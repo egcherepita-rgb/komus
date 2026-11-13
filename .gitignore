@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+data/
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+.openai/
+*.xlsx
+*.log
+backups/
