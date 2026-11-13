@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+data
+__pycache__
+tests
+node_modules
+.openai
+*.xlsx
+backups
