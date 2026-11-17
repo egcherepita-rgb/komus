@@ -23,7 +23,7 @@ def number(value, label, allow_zero=True):
         return int(n)
     except (ValueError,TypeError,OverflowError): raise ValueError(label+': требуется целое число от '+('0' if allow_zero else '1')+' до 1 000 000')
 
-def build_plan(rows, catalog, start, strategy='urgent', reconciled=False, horizon=120):
+def build_plan(rows, catalog, start, strategy='urgent', reconciled=False, horizon=120, daily_used=None):
     if not reconciled: raise ValueError('Сначала подтвердите сверку остатков с уже отгруженными рейсами.')
     if strategy not in ('urgent','compact','balanced'): raise ValueError('Неизвестный вариант расчёта')
     start=date.fromisoformat(start)
@@ -71,6 +71,7 @@ def build_plan(rows, catalog, start, strategy='urgent', reconciled=False, horizo
         day=start+timedelta(days=offset)
         if day.weekday()>4: continue
         for slot in range(2):
+            if slot < (daily_used or {}).get(day.isoformat(),0): continue
             available=sorted((p for p in pallets if p['ready']<=day.isoformat()),key=priority)
             if slot==1 and not any(workdays(date.fromisoformat(p['due']),day)>3 for p in available): break
             doubles=[p for p in available if p['type']=='double']; singles=[p for p in available if p['type']=='single']

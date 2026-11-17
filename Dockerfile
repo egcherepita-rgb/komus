@@ -2,7 +2,7 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && useradd --uid 10001 --create-home komus
-COPY planner.py importer.py server.py ./
+COPY planner.py importer.py server.py workflow.py import_v2.py ledger_store.py ./
 COPY public ./public
 RUN mkdir /data && chown 10001:10001 /data
 USER 10001:10001
