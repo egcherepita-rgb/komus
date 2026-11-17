@@ -6,13 +6,14 @@ const path = require('node:path');
 
 // Execute the real client upload handlers with an isolated DOM/API adapter.
 // No browser session, customer workbook, or production data is involved.
-function client() {
+function client({ upload = true } = {}) {
   const elements = new Map(), calls = [], replies = [];
   const element = id => {
     if (!elements.has(id)) elements.set(id, {
       value: '', files: [], hidden: false, disabled: false, open: false,
       innerHTML: '', textContent: '', classList: { add() {}, remove() {}, toggle() {} },
       reset() {}, showModal() { this.open = true; }, close() { this.open = false; },
+      focus() { this.focused = true; }, scrollIntoView() { this.scrolled = true; },
     });
     return elements.get(id);
   };
@@ -33,7 +34,7 @@ function client() {
     },
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/app.js'), 'utf8'), context);
-  vm.runInContext("showUpload('initial')", context);
+  if (upload) vm.runInContext("showUpload('initial')", context);
   element('uploadFile').files = [{ name: 'initial.xlsx', size: 100 }];
   element('uploadYear').value = '2026'; element('initialMode').value = 'full';
   return { element, calls, replies, run: code => vm.runInContext(code, context),
@@ -97,4 +98,40 @@ test('apply sends only the successfully checked token, then closes the dialog', 
   const apply = c.calls.find(call => call.url === '/api/v2/import-apply');
   assert.deepEqual(JSON.parse(apply.options.body), { revision: 0, token: 'reviewed-token' });
   assert.equal(c.element('uploadDialog').open, false);
+});
+
+const allLayouts = JSON.parse(require('node:child_process').execFileSync('python', [
+  '-c', 'from planner import LAYOUTS; import json; print(json.dumps(LAYOUTS))',
+], { cwd: path.join(__dirname, '..'), encoding: 'utf8' }));
+
+test('layouts tab renders all twelve planner layouts and reuses its read-only response', async () => {
+  const c = client({ upload: false }); c.replies.push(allLayouts);
+  await c.run("tab('layouts'); loadLayouts()");
+  const html = c.element('layoutGrid').innerHTML;
+  assert.equal((html.match(/<article id="layout-/g) || []).length, 12);
+  for (const l of allLayouts) {
+    assert.ok(html.includes(`id="layout-${l.id}"`));
+    assert.ok(html.includes(`Схема ${l.id}: сдвоенных паллет ${l.doubles}, одиночных ${l.singles}`));
+  }
+  await c.run('loadLayouts()');
+  assert.equal(c.calls.length, 1); assert.equal(c.calls[0].url, '/api/layouts');
+  assert.equal(c.calls[0].options.method, 'GET');
+});
+
+test('a truck layout link focuses the matching scheme without changing the plan', async () => {
+  const c = client({ upload: false }); c.replies.push(allLayouts);
+  await c.run('openLayout(12)');
+  assert.equal(c.element('layout-12').focused, true);
+  assert.equal(c.element('layout-12').scrolled, true);
+  assert.equal(c.calls.length, 1); assert.equal(c.calls[0].options.method, 'GET');
+});
+
+test('failed layout loading explains the problem and can be retried', async () => {
+  const c = client({ upload: false }); c.replies.push([]);
+  await assert.rejects(c.run('loadLayouts()'), /12 схем/);
+  assert.equal(c.element('retryLayouts').hidden, false);
+  assert.match(c.element('layoutStatus').textContent, /Не удалось загрузить схемы/);
+  c.replies.push(allLayouts); await c.run("$('retryLayouts').onclick()");
+  assert.equal(c.element('retryLayouts').hidden, true);
+  assert.match(c.element('layoutStatus').textContent, /Все 12 вариантов/);
 });
