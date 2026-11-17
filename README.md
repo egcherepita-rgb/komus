@@ -147,6 +147,7 @@ python server.py
 ```bash
 python -m unittest discover -s tests -v
 node --check public/app.js
+node --test tests/test_upload_ui.cjs
 bash -n deploy/install.sh deploy/update.sh
 ```
 
