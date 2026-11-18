@@ -18,8 +18,9 @@ def base_row(id='r1',order='O1',qty=260,shipped=0):
 def state():
     s=wf.empty_state();s['rows']=[base_row(),base_row('r2','O2')];s['catalog']=[{'name':'A','type':'single','capacity':10,'vertical':False}];s['reconciled']=True;return s
 
-def response(r,qty=260,part='1',ready=TODAY,asof=TODAY,baseline=None):
-    return [r['id'],r['order'],r['position'],r['invoice'],r['komusSku'],r['sku'],r['name'],part,qty,ready,asof,r['shipped'] if baseline is None else baseline]
+def response(r,ready=TODAY,asof=TODAY,baseline=None):
+    return [r['id'],r['order'],r['position'],r['invoice'],r['komusSku'],r['sku'],r['name'],ready,asof,r['shipped'] if baseline is None else baseline]
+
 def parsed_reply(s,rows):return parse_response(xlsx(REPLY_HEADERS,rows),'Data',2026,s)
 def meta(kind,seed='1'):return {'sha':hashlib.sha256((kind+seed).encode()).hexdigest(),'filename':'file.xlsx','kind':kind,'at':wf.now()}
 
@@ -28,9 +29,9 @@ class WorkflowTests(unittest.TestCase):
         for target in ('workflow.today','import_v2.today'):
             p=patch(target,return_value=TODAY);p.start();self.addCleanup(p.stop)
     def test_same_product_in_two_orders_updates_only_target(self):
-        s=state();p=parsed_reply(s,[response(s['rows'][0],100)])
+        s=state();p=parsed_reply(s,[response(s['rows'][0])])
         self.assertFalse(p['errors']);wf.apply_import(s,'response',p,meta('response'))
-        self.assertEqual(sum(l['qty'] for l in s['rows'][0]['lots']),100);self.assertEqual(s['rows'][1]['lots'],[])
+        self.assertEqual(sum(l['qty'] for l in s['rows'][0]['lots']),260);self.assertEqual(s['rows'][1]['lots'],[])
         self.assertEqual([r['qty'] for r in s['rows']],[260,260])
     def test_reply_wrong_order_or_article_or_invoice_does_not_match(self):
         for idx,value in [(1,'O2'),(3,'wrong invoice'),(4,'wrong SKU'),(5,'wrong SKU'),(6,'wrong name')]:
@@ -38,42 +39,43 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue(parsed_reply(s,[row])['errors'])
     def test_reply_matches_order_position_if_id_missing(self):
         s=state();r=response(s['rows'][1]);r[0]='';p=parsed_reply(s,[r]);self.assertEqual(p['changes'][0]['rowId'],'r2')
-    def test_partial_readiness_replaces_not_adds_and_keeps_unconfirmed(self):
-        s=state();r=s['rows'][0]
-        p=parsed_reply(s,[response(r,100,'1'),response(r,50,'2',ready=(date.fromisoformat(TODAY)+timedelta(days=3)).isoformat())]);self.assertFalse(p['errors'])
-        wf.apply_import(s,'response',p,meta('response'));wf.make_plan(s)
-        self.assertEqual(sum(l['qty'] for l in r['lots']),150)
-        self.assertTrue(any(x['rowId']=='r1' and x['qty']==110 and 'Донцовой' in x['reason'] for x in s['plan']['leftovers']))
-        second=parsed_reply(s,[response(r,70)]);wf.apply_import(s,'response',second,meta('response','2'));self.assertEqual(sum(l['qty'] for l in r['lots']),70)
+    def test_reply_uses_order_remaining_and_replaces_one_date(self):
+        s=state();r=s['rows'][0];r['shipped']=60
+        p=parsed_reply(s,[response(r)]);self.assertFalse(p['errors']);wf.apply_import(s,'response',p,meta('response'))
+        self.assertEqual(r['lots'],[{'part':'1','qty':200,'ready':TODAY,'asOf':TODAY}])
+        future=(date.fromisoformat(TODAY)+timedelta(days=3)).isoformat()
+        wf.apply_import(s,'response',parsed_reply(s,[response(r,ready=future)]),meta('response','2'))
+        self.assertEqual(r['lots'][0]['qty'],200);self.assertEqual(wf.position_ready(r),future)
+        wf.apply_import(s,'response',parsed_reply(s,[response(r,ready='')]),meta('response','3'))
+        self.assertEqual(r['lots'],[]);self.assertEqual((r['qty'],r['shipped']),(260,60))
     def test_repeat_file_noop_after_dispatch_and_older_answer_rejected(self):
         s=state();s['rows']=[s['rows'][0]];p=parsed_reply(s,[response(s['rows'][0])]);m=meta('response');wf.apply_import(s,'response',p,m);wf.make_plan(s)
         t=s['plan']['trucks'][0];wf.dispatch(s,s['plan']['id'],t['id'],t['date'])
         self.assertEqual(s['rows'][0]['shipped'],260);self.assertTrue(wf.apply_import(s,'response',p,m)['duplicate']);self.assertEqual(s['rows'][0]['lots'],[])
-    def test_overconfirmation_duplicate_parts_blank_date_and_zero(self):
+    def test_duplicate_position_invalid_date_and_missing_answer_date(self):
         s=state();r=s['rows'][0]
-        for records in [[response(r,261)],[response(r,10,'1'),response(r,10,'1')],[response(r,10,ready='')],[response(r,10,baseline=1)]]:
+        for records in [[response(r),response(r)],[response(r,ready='bad')],[response(r,asof='')],[response(r,baseline=1)]]:
             self.assertTrue(parsed_reply(s,records)['errors'])
-        p=parsed_reply(s,[response(r,0,ready='')]);self.assertFalse(p['errors']);self.assertEqual(p['changes'][0]['lots'],[])
-        v=response(r);v[8]=None;self.assertTrue(parsed_reply(s,[v])['errors'])
+        p=parsed_reply(s,[response(r,ready='',asof='')]);self.assertFalse(p['errors']);self.assertEqual(p['count'],0)
     def test_stale_template_after_shipment(self):
-        s=state();s['rows'][0]['shipped']=10;p=parsed_reply(s,[response(s['rows'][0],100,baseline=0)]);self.assertTrue(p['errors'])
+        s=state();s['rows'][0]['shipped']=10;p=parsed_reply(s,[response(s['rows'][0],baseline=0)]);self.assertTrue(p['errors'])
     def test_prepopulated_reply_template_no_answer_is_no_update(self):
         s=state();p=parse_response(template_file('response',s['rows']),'Ответ Донцовой',2026,s)
         self.assertEqual(p['count'],0);self.assertFalse(p['errors'])
-    def test_reply_template_hides_auto_fields_and_has_no_comment_column(self):
+    def test_reply_template_has_only_dates_and_hidden_automatic_fields(self):
         s=state();w=load_workbook(BytesIO(template_file('response',s['rows'])),data_only=True);sheet=w['Ответ Донцовой']
-        self.assertTrue(sheet.column_dimensions['A'].hidden);self.assertTrue(sheet.column_dimensions['L'].hidden)
-        self.assertEqual(sheet['A5'].value,'r1');self.assertEqual(sheet['L5'].value,0);self.assertEqual(sheet['H5'].value,'1')
-        self.assertNotIn('Комментарий Донцовой',[c.value for c in sheet[4]])
-        blank=load_workbook(BytesIO(template_file('response')));self.assertEqual(blank.active['L5'].value,0)
-    def test_reply_zero_or_default_part_needs_no_comment(self):
-        s=state();r=response(s['rows'][0],0,ready='');r[7]='';p=parsed_reply(s,[r])
-        self.assertFalse(p['errors']);self.assertEqual(p['changes'][0]['lots'],[])
-        r=response(s['rows'][0],20);r[7]='';p=parsed_reply(s,[r]);self.assertFalse(p['errors']);self.assertEqual(p['changes'][0]['lots'][0]['part'],'1')
-    def test_older_reply_template_with_comment_is_still_accepted(self):
-        s=state();r=response(s['rows'][0],20);r.insert(11,'Legacy note')
-        headers=REPLY_HEADERS[:11]+['Комментарий Донцовой']+REPLY_HEADERS[11:]
-        p=parse_response(xlsx(headers,[r]),'Data',2026,s);self.assertFalse(p['errors']);self.assertEqual(p['changes'][0]['lots'][0]['qty'],20)
+        self.assertTrue(sheet.column_dimensions['A'].hidden);self.assertTrue(sheet.column_dimensions['J'].hidden)
+        self.assertEqual(sheet['A5'].value,'r1');self.assertEqual(sheet['J5'].value,0);self.assertIsNone(sheet['H5'].value)
+        for removed in ('№ части','Подтверждено, шт.','Комментарий Донцовой'):self.assertNotIn(removed,[c.value for c in sheet[4]])
+        blank=load_workbook(BytesIO(template_file('response')));self.assertEqual(blank.active['J5'].value,0)
+    def test_parsed_response_contains_no_manual_quantity_or_parts(self):
+        s=state();p=parsed_reply(s,[response(s['rows'][0])]);self.assertFalse(p['errors'])
+        self.assertEqual(p['changes'][0]['ready'],TODAY);self.assertNotIn('lots',p['changes'][0]);self.assertNotIn('qty',p['changes'][0])
+    def test_older_partial_reply_template_is_rejected_instead_of_expanding_quantity(self):
+        s=state();r=response(s['rows'][0]);headers=REPLY_HEADERS[:7]+['№ части','Подтверждено, шт.']+REPLY_HEADERS[7:]
+        values=r[:7]+['1',20]+r[7:]
+        with self.assertRaisesRegex(ValueError,'Шаблон устарел'):parse_response(xlsx(headers,[values]),'Data',2026,s)
+        self.assertEqual(s['rows'][0]['lots'],[])
     def test_order_template_append_and_duplicate_order_protection(self):
         raw=xlsx(ORDER_HEADERS,[['O3','10','I3','K1','S1','A',25,TODAY,'']]);parsed=parse_order(raw,'Data',2026)
         s=state();wf.apply_import(s,'order',parsed,meta('order'));self.assertEqual(len(s['rows']),3);self.assertEqual(s['rows'][2]['lots'],[]);self.assertEqual(len(s['catalog']),1)
@@ -91,7 +93,7 @@ class WorkflowTests(unittest.TestCase):
     def test_invalid_initial_quantity_blocks_whole_import(self):
         raw=xlsx(['№ заказа:','Наименование','Кол.'],[['O1','A','bad']]);p=parse_initial(raw,'Data',2026,'remaining');self.assertTrue(p['errors'])
     def test_dispatch_conserves_orders_lots_and_duplicate_does_not_double_count(self):
-        s=state();s['rows']=[base_row(qty=520)];wf.apply_import(s,'response',parsed_reply(s,[response(s['rows'][0],520)]),meta('response'));wf.make_plan(s)
+        s=state();s['rows']=[base_row(qty=520)];wf.apply_import(s,'response',parsed_reply(s,[response(s['rows'][0])]),meta('response'));wf.make_plan(s)
         old_id=s['plan']['id'];t=s['plan']['trucks'][0];wf.dispatch(s,old_id,t['id'],t['date'])
         self.assertEqual(s['rows'][0]['shipped'],260);self.assertEqual(s['rows'][0]['lots'][0]['qty'],260);self.assertEqual(len(s['shipments']),1)
         self.assertTrue(wf.dispatch(s,old_id,t['id'],t['date'])['duplicate']);self.assertEqual(s['rows'][0]['shipped'],260)
@@ -100,25 +102,28 @@ class WorkflowTests(unittest.TestCase):
         s=state();r=s['rows'][0];r['lots']=[{'part':'1','qty':260,'ready':TODAY}];wf.make_plan(s)
         with self.assertRaises(ValueError):wf.dispatch(s,s['plan']['id'],1,(date.fromisoformat(TODAY)+timedelta(days=100)).isoformat())
         with self.assertRaises(ValueError):wf.dispatch(s,s['plan']['id'],1,(date.fromisoformat(TODAY)-timedelta(days=1)).isoformat())
-    def test_two_whole_pallets_of_one_order_can_ship_on_different_days(self):
-        s=state();a=base_row(qty=40);b=base_row('r2','O2',qty=500);b['name']='B'
-        tomorrow=(date.fromisoformat(TODAY)+timedelta(days=1)).isoformat()
-        a['lots']=[{'part':'1','qty':20,'ready':TODAY},{'part':'2','qty':20,'ready':tomorrow}];b['lots']=[{'part':'1','qty':500,'ready':TODAY}]
-        s['rows']=[a,b];s['catalog']=[{'name':'A','type':'single','capacity':20},{'name':'B','type':'single','capacity':10}];wf.make_plan(s)
+    def test_two_pallets_with_one_readiness_date_can_ship_on_different_days(self):
+        s=state();tomorrow=(date.fromisoformat(TODAY)+timedelta(days=1)).isoformat()
+        a=base_row(qty=40);a['due']=(date.fromisoformat(TODAY)+timedelta(days=2)).isoformat()
+        b=base_row('r2','O2',qty=24);b['name']='B';c=base_row('r3','O3',qty=24);c['name']='B'
+        for r,ready in [(a,TODAY),(b,TODAY),(c,tomorrow)]:r['lots']=[{'part':'1','qty':r['qty'],'ready':ready}]
+        s['rows']=[a,b,c];s['catalog']=[{'name':'A','type':'double','capacity':20},{'name':'B','type':'single','capacity':1}];wf.make_plan(s)
         self.assertEqual([t['date'] for t in s['plan']['trucks']],[TODAY,tomorrow])
         for t in s['plan']['trucks']:self.assertEqual(sum(p['qty'] for p in t['pallets'] if p['rowId']=='r1'),20)
-        t=s['plan']['trucks'][0];wf.dispatch(s,s['plan']['id'],t['id'],TODAY);self.assertEqual(a['shipped'],20)
+        t=s['plan']['trucks'][0];wf.dispatch(s,s['plan']['id'],t['id'],TODAY)
+        self.assertEqual(a['shipped'],20);self.assertEqual(wf.position_ready(a),TODAY)
         with patch('workflow.today',return_value=tomorrow):
             t=s['plan']['trucks'][0];wf.dispatch(s,s['plan']['id'],t['id'],tomorrow)
         self.assertEqual(a['shipped'],40);self.assertEqual(a['lots'],[]);self.assertEqual(len(s['shipments']),2)
-    def test_readiness_fragments_combine_only_after_all_pieces_are_ready(self):
+    def test_legacy_partial_or_multiple_dates_wait_for_one_position_date(self):
         s=state();a=base_row(qty=20);b=base_row('r2','O2',qty=250);b['name']='B'
         tomorrow=(date.fromisoformat(TODAY)+timedelta(days=1)).isoformat()
         a['lots']=[{'part':'1','qty':7,'ready':TODAY},{'part':'2','qty':13,'ready':tomorrow}];b['lots']=[{'part':'1','qty':250,'ready':TODAY}]
         s['rows']=[a,b];s['catalog']=[{'name':'A','type':'single','capacity':20},{'name':'B','type':'single','capacity':10}];wf.make_plan(s)
-        t=s['plan']['trucks'][0];self.assertEqual(t['date'],tomorrow)
-        pallet=next(p for p in t['pallets'] if p['rowId']=='r1');self.assertEqual(pallet['qty'],20)
-        self.assertEqual(pallet['lotAllocations'],[{'lotId':'1','qty':7},{'lotId':'2','qty':13}])
+        self.assertFalse(s['plan']['trucks']);self.assertTrue(any('одна дата' in x['reason'] for x in s['plan']['leftovers']))
+        self.assertTrue(wf.public_state(s)['rows'][0]['readinessNeedsReview'])
+        wf.apply_import(s,'response',parsed_reply(s,[response(a,ready=tomorrow)]),meta('response'))
+        wf.make_plan(s);t=s['plan']['trucks'][0];self.assertEqual(t['date'],tomorrow)
         with patch('workflow.today',return_value=tomorrow):wf.dispatch(s,s['plan']['id'],t['id'],tomorrow)
         self.assertEqual(a['shipped'],20);self.assertEqual(a['lots'],[])
     def test_old_or_partial_cached_plan_cannot_be_dispatched(self):

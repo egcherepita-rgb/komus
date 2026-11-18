@@ -40,6 +40,15 @@ def validate_row(r):
     if total>qty-shipped:raise ValueError('Подтверждено больше неотгруженного остатка')
     return qty,shipped
 
+def position_ready(r):
+    """A date is usable only when it covers the whole unshipped order position."""
+    try:
+        q,s=validate_row(r);lots=r.get('lots',[])
+        if q==s or not lots or sum(l['qty'] for l in lots)!=q-s:return ''
+        dates={l['ready'] for l in lots}
+        return next(iter(dates)) if len(dates)==1 else ''
+    except ValueError:return ''
+
 def upgrade(project):
     if not project:return empty_state()
     if project.get('schema')==2:return deepcopy(project)
@@ -66,7 +75,7 @@ def list_orders(state):
         entry=result.setdefault(o,{'order':o,'lines':0,'qty':0,'shipped':0,'remaining':0,'confirmed':0,'due':'','issues':0})
         entry['lines']+=1
         try:
-            q,s=validate_row(r);left=q-s; confirmed=sum(x['qty'] for x in r['lots'])
+            q,s=validate_row(r);left=q-s; confirmed=left if position_ready(r) else 0
             entry['qty']+=q;entry['shipped']+=s;entry['remaining']+=left;entry['confirmed']+=confirmed
         except ValueError:entry['issues']+=1
         if r.get('due'):entry['due']=min(entry['due'] or r['due'],r['due'])
@@ -74,6 +83,8 @@ def list_orders(state):
 
 def public_state(state):
     s=deepcopy(state);s['orders']=list_orders(s)
+    for r in s['rows']:
+        r['ready']=position_ready(r);r['readinessNeedsReview']=bool(r.get('lots')) and not r['ready']
     s['totals']={k:sum(o[k] for o in s['orders']) for k in ('qty','shipped','remaining','confirmed')}
     return s
 
@@ -103,8 +114,14 @@ def apply_import(state,kind,parsed,meta):
             if not r:raise ValueError('Позиция заказа больше не существует. Обновите предварительный просмотр.')
             if r['shipped']!=change['shippedAtRequest']:raise ValueError('После подготовки ответа прошла отгрузка. Скачайте свежий шаблон ответа.')
             if r.get('replyAsOf','')>change['asOf']:raise ValueError('Ответ старее уже сохранённого подтверждения')
-            candidate=dict(r,lots=change['lots']);validate_row(candidate)
-            r['lots']=deepcopy(change['lots']);r['replyAsOf']=change['asOf'];r['replyComment']=change.get('comment','')
+            ready=change['ready']
+            if ready:
+                try:date.fromisoformat(ready)
+                except (TypeError,ValueError):raise ValueError('Проверьте дату готовности позиции')
+            q,s=validate_row(r)
+            lots=[{'part':'1','qty':q-s,'ready':ready,'asOf':change['asOf']}] if ready and q>s else []
+            candidate=dict(r,lots=lots);validate_row(candidate)
+            r['lots']=lots;r['replyAsOf']=change['asOf']
     else:raise ValueError('Неизвестный тип загрузки')
     if len(state['rows'])>5000:raise ValueError('В журнале не может быть более 5000 позиций')
     state['imports'].append(dict(meta,kind=kind,lines=parsed.get('count',len(parsed.get('rows',parsed.get('catalog',[]))))))
@@ -114,7 +131,7 @@ def apply_import(state,kind,parsed,meta):
 def update_row(state,rid,changes):
     r=next((r for r in state['rows'] if r['id']==rid),None)
     if r is None:raise ValueError('Позиция не найдена')
-    allowed={'order','position','invoice','sku','komusSku','name','due','qty','shipped','lots'}
+    allowed={'order','position','invoice','sku','komusSku','name','due','qty','shipped'}
     if set(changes)-allowed:raise ValueError('Неизвестное поле позиции')
     candidate=deepcopy(r);candidate.update(changes);candidate['order']=canonical_order(candidate.get('order'))
     # Shipment history is authoritative after the first recorded dispatch.
@@ -139,12 +156,14 @@ def make_plan(state):
             if not r.get('due'):raise ValueError('Не указан срок «Отгрузить до»')
             if not r.get('order'):raise ValueError('Не указан номер заказа')
             confirmed=sum(l['qty'] for l in r['lots'])
-            if confirmed:
+            ready=position_ready(r)
+            if confirmed and not ready:raise ValueError('Нужна одна дата готовности на весь остаток позиции. Загрузите новый ответ Донцовой.')
+            if ready:
                 unit=r['id'];mapping[unit]=r
                 units.append({'id':unit,'name':r['name'],'order':r['order'],'invoice':r.get('invoice',''),
-                              'qty':confirmed,'shipped':0,'ready':min(l['ready'] for l in r['lots']),'due':r['due'],'lots':deepcopy(r['lots'])})
-            if left>confirmed:extra.append({'rowId':r['id'],'order':r['order'],'position':r['position'],'invoice':r.get('invoice',''),
-                 'name':r['name'],'qty':left-confirmed,'reason':'Нет подтверждённой готовности от Донцовой на это количество'})
+                              'qty':left,'shipped':0,'ready':ready,'due':r['due'],'lots':deepcopy(r['lots'])})
+            else:extra.append({'rowId':r['id'],'order':r['order'],'position':r['position'],'invoice':r.get('invoice',''),
+                 'name':r['name'],'qty':left,'reason':'Нет даты готовности позиции от Донцовой'})
         except ValueError as e:
             issues.append({'rowId':r['id'],'name':r.get('name',''),'reason':str(e)})
             try:left=max(0,number(r.get('qty'),'Кол.')-number(r.get('shipped',0),'Отгружено'))
@@ -163,7 +182,7 @@ def make_plan(state):
         r=mapping[item['rowId']];item.update(rowId=r['id'],position=r['position'])
     for item in p['issues']:
         r=mapping[item['rowId']];item['rowId']=r['id']
-    p['leftovers'].extend(extra);p['issues'].extend(issues);p['id']=uid();p['createdAt']=now()
+    p['leftovers'].extend(extra);p['issues'].extend(issues);p['id']=uid();p['createdAt']=now();p['readinessMode']='position'
     state['plan']=p;return p
 
 def dispatch(state,plan_id,truck_id,actual_date):
@@ -173,7 +192,7 @@ def dispatch(state,plan_id,truck_id,actual_date):
     if not p or p['id']!=plan_id:raise ValueError('План изменился. Обновите страницу.')
     t=next((x for x in p['trucks'] if x['id']==truck_id),None)
     if not t:raise ValueError('Машина не найдена в текущем плане')
-    if not p.get('wholePalletsOnly'):raise ValueError('Пересоберите машины: этот план создан до включения правила целых паллет.')
+    if not p.get('wholePalletsOnly') or p.get('readinessMode')!='position':raise ValueError('Пересоберите машины: нужна одна дата готовности позиции и отгрузка целыми паллетами.')
     try:actual=date.fromisoformat(actual_date)
     except (TypeError,ValueError):raise ValueError('Укажите фактическую дату отгрузки')
     if actual.isoformat()>today():raise ValueError('Нельзя отметить будущую дату фактической отгрузки')
@@ -185,6 +204,7 @@ def dispatch(state,plan_id,truck_id,actual_date):
     index={r['id']:r for r in state['rows']}
     for item in t['pallets']+t['loose']:
         r=index[item['rowId']];matches=[c for c in state['catalog'] if normalize(c.get('name'))==normalize(r['name'])]
+        if not position_ready(r):raise ValueError('Нет одной даты готовности на весь остаток позиции. Обновите ответ Донцовой.')
         if len(matches)!=1:raise ValueError('Проверьте кратность позиции и пересоберите машины.')
         cap=pallet_capacity(matches[0])
         if item.get('partial') or item.get('capacity')!=cap or item['qty']!=cap:raise ValueError('Отгрузка допускается только целыми паллетами. Пересоберите машины.')

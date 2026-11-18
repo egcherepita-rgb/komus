@@ -74,7 +74,7 @@ class ServerTests(unittest.TestCase):
         w=Workbook();w.active.append(['','','ТУЛА','','','МОСКВА']);w.active.append(['','ВП','Наименование','Кратность']);w.active.append(['1','','A',20]);b=BytesIO();w.save(b)
         upload(b.getvalue(),'catalog',w.active.title)
         w=load_workbook(BytesIO(self.request(c,'/api/v2/templates/response?order=E2E').read()));s=w.active
-        for cell,value in {'H5':'1','I5':440,'J5':'2026-11-17','K5':'2026-11-17'}.items():s[cell]=value
+        for cell,value in {'H5':'2026-11-17','I5':'2026-11-17'}.items():s[cell]=value
         b=BytesIO();w.save(b);reply=b.getvalue();upload(reply,'response','Ответ Донцовой')
         saved=json.load(self.request(c,'/api/v2/reconcile',{'revision':rev}));rev=saved['revision']
         saved=json.load(self.request(c,'/api/v2/build',{'revision':rev,'start':'2026-11-17'}));rev=saved['revision'];plan=saved['state']['plan']
@@ -84,6 +84,6 @@ class ServerTests(unittest.TestCase):
         stored=ledger_store.read(server.DATA)[1];self.assertEqual(stored['rows'][0]['shipped'],shipped)
         self.assertEqual(sum(p['qty'] for t in stored['plan']['trucks'] for p in t['pallets'])+shipped,440);self.assertEqual(len(stored['shipments']),1)
         self.assertTrue(json.load(self.request(c,'/api/v2/import-preview?kind=response',reply,raw=True))['duplicate'])
-        w.active['I5']=100;b=BytesIO();w.save(b)
+        w.active['H5']='2026-11-18';b=BytesIO();w.save(b)
         stale=json.load(self.request(c,'/api/v2/import-preview?kind=response&sheet='+urllib.parse.quote('Ответ Донцовой'),b.getvalue(),raw=True,revision=saved['revision']))
         self.assertTrue(stale['errors'])

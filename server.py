@@ -114,7 +114,7 @@ class Handler(BaseHTTPRequestHandler):
                     data=template_file('response',rows);filename='dontsova-response.xlsx'
                 elif path=='/api/v2/export':
                     rev,state=ledger_store.read(DATA)
-                    if not state.get('plan') or not state['plan'].get('wholePalletsOnly'):raise ValueError('Сначала пересоберите машины: отгрузка разрешена только целыми паллетами')
+                    if not state.get('plan') or not state['plan'].get('wholePalletsOnly') or state['plan'].get('readinessMode')!='position':raise ValueError('Сначала пересоберите машины: одна дата готовности позиции, отгрузка целыми паллетами')
                     data=export_plan(state['plan']);filename='komus-machines.xlsx'
                 elif path=='/api/v2/source':
                     found=ledger_store.source(DATA,query.get('sha',[''])[0])
