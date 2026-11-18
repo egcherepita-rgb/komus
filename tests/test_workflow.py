@@ -90,6 +90,40 @@ class WorkflowTests(unittest.TestCase):
         s=state();row=response(s['rows'][0]);row[0]='';row[5]='Название Комуса'
         p=parsed_reply(s,[row]);self.assertFalse(p['errors']);self.assertEqual(p['changes'][0]['rowId'],'r1')
         row[4]='WRONG';self.assertTrue(parsed_reply(s,[row])['errors'])
+    def test_komus_article_takes_priority_over_promet_fallback(self):
+        s=state()
+        s['rows'][0].update(sku='',komusSku='1436687')
+        s['rows'].append(dict(base_row('r3','O1'),position='20',sku='S23099404602',komusSku=''))
+        row=response(s['rows'][0]);row[0]='';row[3]=1436687.0;row[4]='S23099404602'
+        parsed=parsed_reply(s,[row])
+        self.assertFalse(parsed['errors'])
+        self.assertEqual(parsed['changes'][0]['rowId'],'r1')
+        wf.apply_import(s,'response',parsed,meta('response'))
+        self.assertEqual(s['rows'][0]['sku'],'S23099404602')
+        self.assertEqual(s['rows'][2]['lots'],[])
+    def test_ready_reply_with_promet_name_builds_and_dispatches_original_komus_row(self):
+        s=state();row=s['rows'][0]
+        row['name']='Шкаф 0MX_ML-11-50U (LS-11-50)'
+        promet_name='Шкаф для раздевалок усиленный ML-11-50U (LS-11-50)'
+        s['catalog'][0]['name']=promet_name
+        reply=response(row);reply[0]='';reply[5]=promet_name
+        parsed=parsed_reply(s,[reply])
+        self.assertFalse(parsed['errors'])
+        self.assertEqual(parsed['changes'][0]['prometName'],promet_name)
+        wf.apply_import(s,'response',parsed,meta('response'))
+        plan=wf.make_plan(s)
+        self.assertEqual(len(plan['trucks']),1)
+        wf.dispatch(s,plan['id'],plan['trucks'][0]['id'],TODAY)
+        self.assertEqual(row['shipped'],260)
+        self.assertIn('0MX_',row['name'])
+    def test_same_article_different_model_suffix_warns_without_replacing_catalog_name(self):
+        s=state();row=s['rows'][0]
+        row['name']='Шкаф 0MX_ML-11-50U (LS-11-50)'
+        reply=response(row);reply[5]='Шкаф ML-11-50 (LS-11-50)'
+        parsed=parsed_reply(s,[reply])
+        self.assertFalse(parsed['errors'])
+        self.assertTrue(any('модель' in w for w in parsed['warnings']))
+        self.assertNotIn('prometName',parsed['changes'][0])
     def test_quantity_alone_cannot_identify_product_or_order(self):
         s=state();row=response(s['rows'][0]);row[0]='';row[1]='';row[2]=''
         self.assertTrue(parsed_reply(s,[row])['errors'])

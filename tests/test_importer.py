@@ -18,6 +18,12 @@ class ImportTests(unittest.TestCase):
         raw=bytes_for(w);self.assertEqual(len(rows_import(raw)['sheets']),2)
         r=rows_import(raw,s.title,2026)['rows'];self.assertEqual(len(r),2);self.assertEqual(r[0]['shipped'],0);self.assertEqual(r[1]['order'],'O1');self.assertEqual(r[1]['ready'],'')
         with self.assertRaises(ValueError):rows_import(raw,'отгруженные целиком',2026)
+    def test_tula_catalog_accepts_optional_article_columns(self):
+        w=Workbook();s=w.active
+        s.append(['','','ТУЛА']);s.append(['','ВП','Наименование','Кратность','','Артикул ПРОМЕТ','Артикул Комуса'])
+        s.append(['0.5','','Шкаф',22,None,'S23099404602',1436687])
+        item=catalog_import(bytes_for(w))['catalog'][0]
+        self.assertEqual((item['sku'],item['komusSku']),('S23099404602','1436687'))
     def test_dates_and_export_formula_injection(self):
         self.assertEqual(parse_date('18.11.',2026),'2026-11-18');self.assertEqual(parse_date('31.02.',2026),'')
         p=build_plan([dict(id='1',name='=1+1',qty=26,ready='2026-11-16',due='2026-11-18',order='@x',invoice='I')],[dict(name='=1+1',type='single',capacity=1)],'2026-11-16',reconciled=True)

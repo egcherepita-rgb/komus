@@ -4,7 +4,7 @@ from copy import deepcopy
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 import hashlib, json, uuid
-from planner import build_plan, number, normalize, workdays, pallet_capacity
+from planner import build_plan, number, resolve_catalog_product, workdays, pallet_capacity
 
 
 def today(): return datetime.now(ZoneInfo('Europe/Moscow')).date().isoformat()
@@ -124,6 +124,11 @@ def apply_import(state,kind,parsed,meta):
             lots=[{'part':'1','qty':q-s,'ready':ready,'asOf':change['asOf']}] if ready and q>s else []
             candidate=dict(r,lots=lots);validate_row(candidate)
             r['lots']=lots;r['replyAsOf']=change['asOf']
+            for field in ('sku','komusSku'):
+                if not r.get(field) and change.get(field):
+                    r[field]=change[field]
+            if change.get('prometName'):
+                r['prometName']=change['prometName']
     else:raise ValueError('Неизвестный тип загрузки')
     if len(state['rows'])>5000:raise ValueError('В журнале не может быть более 5000 позиций')
     state['imports'].append(dict(meta,kind=kind,lines=parsed.get('count',len(parsed.get('rows',parsed.get('catalog',[]))))))
@@ -144,6 +149,8 @@ def update_row(state,rid,changes):
         if any(candidate.get(k)!=r.get(k) for k in ('order','position','name','invoice','sku','komusSku')):raise ValueError('Реквизиты позиции с фактической отгрузкой связаны с историей отгрузок.')
     if 'lots' not in changes and any(candidate.get(k)!=r.get(k) for k in ('qty','shipped')):
         candidate['lots']=[];candidate['replyAsOf']='';candidate['replyComment']='Количество исправлено вручную: требуется новое подтверждение остатка.'
+    if any(candidate.get(k)!=r.get(k) for k in ('name','sku','komusSku')):
+        candidate['prometName']=''
     validate_row(candidate)
     if any(x['id']!=rid and key(x.get('order'),x.get('position'))==key(candidate['order'],candidate['position']) for x in state['rows']):raise ValueError('Такая позиция этого заказа уже существует')
     r.update(candidate);state['reconciled']=False;state['plan']=None
@@ -214,6 +221,7 @@ def make_plan(state):
             if ready:
                 unit=r['id'];mapping[unit]=r
                 units.append({'id':unit,'name':r['name'],'order':r['order'],'invoice':r.get('invoice',''),
+                              'sku':r.get('sku'),'komusSku':r.get('komusSku'),'prometName':r.get('prometName'),
                               'qty':left,'shipped':0,'ready':ready,'due':r['due'],'lots':limit_lots(r['lots'],left)})
             else:extra.append({'rowId':r['id'],'order':r['order'],'position':r['position'],'invoice':r.get('invoice',''),
                  'name':r['name'],'qty':left,'reason':'Нет даты готовности позиции от Донцовой'})
@@ -256,10 +264,9 @@ def dispatch(state,plan_id,truck_id,actual_date):
     allocations=defaultdict(int)
     index={r['id']:r for r in state['rows']}
     for item in t['pallets']+t['loose']:
-        r=index[item['rowId']];matches=[c for c in state['catalog'] if normalize(c.get('name'))==normalize(r['name'])]
+        r=index[item['rowId']]
         if not position_ready(r):raise ValueError('Нет одной даты готовности на весь остаток позиции. Обновите ответ Донцовой.')
-        if len(matches)!=1:raise ValueError('Проверьте кратность позиции и пересоберите машины.')
-        cap=pallet_capacity(matches[0])
+        cap=pallet_capacity(resolve_catalog_product(r,state['catalog']))
         if item.get('partial') or item.get('capacity')!=cap or item['qty']!=cap:raise ValueError('Отгрузка допускается только целыми паллетами. Пересоберите машины.')
         sources=item.get('lotAllocations',[])
         if not sources or sum(number(a.get('qty'),'Количество части',False) for a in sources)!=item['qty']:raise ValueError('Не совпадает состав готовности паллеты. Пересоберите машины.')

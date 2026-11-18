@@ -10,6 +10,71 @@ def normalize(value):
     text = text.translate(str.maketrans('АВСЕНКМОРТХ','ABCEHKMOPTX'))
     return re.sub(r'[^A-ZА-Я0-9/]', '', text)
 
+def without_komus_prefix(value):
+    return re.sub(r'(?<![\w])[0ОO][МM][ХX]_\s*', '', str(value or ''), flags=re.I)
+
+def product_name_key(value):
+    return normalize(without_komus_prefix(value))
+
+def article_key(value):
+    value = str(value if value is not None else '').strip().upper()
+    if re.fullmatch(r'\d+\.0+', value):
+        return value.split('.')[0]
+    return value
+
+def article_candidates(product, candidates):
+    """Prefer Komus, corroborate with Promet, and discard contradictory codes."""
+    komus = article_key(product.get('komusSku'))
+    promet = article_key(product.get('sku'))
+    primary = [row for row in candidates if komus and article_key(row.get('komusSku')) == komus]
+    compatible = []
+    for row in primary or candidates:
+        row_komus = article_key(row.get('komusSku'))
+        row_promet = article_key(row.get('sku'))
+        if komus and row_komus and komus != row_komus:
+            continue
+        if promet and row_promet and promet != row_promet:
+            continue
+        compatible.append(row)
+    secondary = [row for row in compatible if promet and article_key(row.get('sku')) == promet]
+    if primary:
+        return secondary or compatible, True
+    if secondary:
+        return secondary, True
+    return compatible, False
+
+def different_product_model(left, right):
+    """Compare whole model codes, including terminal letters, before comparing digits."""
+    def signature(value):
+        value = without_komus_prefix(value).upper().translate(str.maketrans('АВСЕНКМОРТХ–—−', 'ABCEHKMOPTX---'))
+        models = re.findall(r'(?<![A-ZА-Я0-9])[A-Z]+(?:/[A-Z]+)?[ -]?\d+[A-Z]*(?:-\d+[A-Z]*)*', value)
+        return [re.sub(r' ', '-', model) for model in models], re.findall(r'\d+', value)
+    first, first_numbers = signature(left)
+    second, second_numbers = signature(right)
+    if first and second:
+        if first[0] != second[0]:
+            return True
+    # Names without a model can still disagree on dimensions or other numeric details.
+    return bool(first_numbers and second_numbers and first_numbers != second_numbers
+                and not (first and second and (first_numbers == second_numbers[:len(first_numbers)]
+                                               or second_numbers == first_numbers[:len(second_numbers)])))
+
+def resolve_catalog_product(product, catalog):
+    candidates, matched_article = article_candidates(product, catalog)
+    if matched_article:
+        if len(candidates) == 1:
+            return candidates[0]
+        reason = 'Артикулы расходятся' if not candidates else 'Артикул соответствует нескольким строкам'
+        raise ValueError(f'{reason} в справочнике Тула. Проверьте артикулы Комуса и ПРОМЕТ.')
+    for name in (product.get('prometName'), product.get('name')):
+        key = product_name_key(name)
+        matches = [row for row in candidates if key and product_name_key(row.get('name')) == key]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            break
+    raise ValueError('Нет однозначного совпадения в справочнике Тула. Проверьте артикулы или полную модель товара.')
+
 def workdays(a,b):
     """Weekdays after a through b, without a public-holiday calendar."""
     return sum((a+timedelta(days=n)).weekday()<5 for n in range(1,max(0,(b-a).days)+1))
@@ -59,8 +124,6 @@ def build_plan(rows, catalog, start, strategy='urgent', reconciled=False, horizo
     if strategy not in ('urgent','compact','balanced'): raise ValueError('Неизвестный вариант расчёта')
     start=date.fromisoformat(start)
     if len(rows)>5000: raise ValueError('Не более 5000 строк в проекте')
-    index={}
-    for c in catalog: index.setdefault(normalize(c.get('name')),[]).append(c)
     pallets=[]; loose=[]; issues=[]; remaining={}; rowmap={}; reasons={};tails={};capacities={}
     for pos, source in enumerate(rows):
         r=dict(source); rid=str(r.get('id',pos))
@@ -74,9 +137,7 @@ def build_plan(rows, catalog, start, strategy='urgent', reconciled=False, horizo
             if not str(r.get('name','')).strip(): raise ValueError('Не указано наименование')
             try: ready=date.fromisoformat(r.get('ready','')); due=date.fromisoformat(r.get('due',''))
             except (TypeError,ValueError): raise ValueError('Укажите готовность и срок «Отгрузить до»')
-            matches=index.get(normalize(r['name']),[])
-            if len(matches)!=1: raise ValueError('Нет однозначного совпадения в справочнике Тула')
-            c=matches[0]; typ=c.get('type')
+            c=resolve_catalog_product(r,catalog); typ=c.get('type')
             if typ not in ('single','double','split','loose'): raise ValueError('Укажите тип паллетирования')
             if c.get('needsReview'): raise ValueError('Подтвердите толкование кратности в справочнике')
             common={'rowId':rid,'name':r['name'],'order':r.get('order',''),'invoice':r.get('invoice',''),

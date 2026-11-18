@@ -5,6 +5,7 @@ import re, zipfile
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.styles.colors import COLOR_INDEX
+from planner import article_key
 
 def workbook(raw):
     if len(raw)>15*1024*1024: raise ValueError('Файл больше 15 МБ')
@@ -36,6 +37,14 @@ def parse_date(value,year):
 
 def catalog_import(raw):
     w=workbook(raw); s=w.active; result=[]
+    article_columns={}
+    for cells in s.iter_rows(max_row=2):
+        for cell in cells:
+            title=' '.join(str(cell.value or '').lower().split()).rstrip(':').strip()
+            if title=='артикул комуса' or title=='артикул комус':
+                article_columns.setdefault('komusSku',cell.column-1)
+            elif title=='артикул промет':
+                article_columns.setdefault('sku',cell.column-1)
     for row in s.iter_rows(min_row=3):
         if len(row)<4 or not row[2].value: continue
         marker=str(row[0].value or '').replace(',','.').strip().rstrip('.')
@@ -44,8 +53,12 @@ def catalog_import(raw):
         typ='loose' if marker=='0' else 'single' if marker=='0.5' else 'split' if red(row[0]) else 'double'
         try:cap=int(amount); review=cap<=0
         except ValueError:cap=0;review=True
-        result.append(dict(name=name,type=typ,capacity=cap,vertical=str(row[1].value or '').strip().upper()=='ВП',
-                           original=amount,needsReview=review,fixation='',source=f'{s.title}!C{row[2].row}:D{row[2].row}'))
+        item=dict(name=name,type=typ,capacity=cap,vertical=str(row[1].value or '').strip().upper()=='ВП',
+                  original=amount,needsReview=review,fixation='',source=f'{s.title}!C{row[2].row}:D{row[2].row}')
+        for field,column in article_columns.items():
+            article=article_key(row[column].value)
+            if article:item[field]=article
+        result.append(item)
     if not result:raise ValueError('Не найден справочник Тула: ожидаются маркер A, ВП B, наименование C, кратность D')
     return {'catalog':result,'warnings':['Сложные кратности требуют ручного подтверждения. Для красной 1 введите количество на сдвоенный паллет; программа разделит его пополам.']}
 

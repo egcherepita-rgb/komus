@@ -7,7 +7,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font,PatternFill,Alignment
 from openpyxl.worksheet.table import Table,TableStyleInfo
 from importer import workbook,parse_date,catalog_import
-from planner import number
+from planner import article_candidates, different_product_model, number, product_name_key
 from workflow import canonical_order,clean,key,uid,validate_row,today
 
 ORDER_HEADERS=['№ заказа Комуса','Номер счета','Артикул Комуса','Артикул Промет','Наименование','Заказано, шт.','Отгрузить до','Комментарий']
@@ -104,26 +104,12 @@ def parse_order(raw,sheet,year):
         except ValueError as e:errors.append({'line':line,'name':text(g('Наименование')),'reason':str(e)})
     return {'rows':rows,'errors':errors,'count':len(rows),'warnings':['Все новые заказы из файла добавятся к общему журналу. Номер позиции не нужен. Готовность обновляется ответом Донцовой.']}
 
-def response_match(r,order,invoice,product,quantity):
-    """Business references identify a row; never guess across orders or products."""
-    if order and canonical_order(r.get('order'))!=order:return False
-    if invoice and header(r.get('invoice'))!=header(invoice):return False
-    if quantity is not None and r['qty']!=quantity:return False
-    matched_article=False
-    for field in ('sku','komusSku'):
-        if product[field] and r.get(field):
-            if header(product[field])!=header(r[field]):return False
-            matched_article=True
-    # Names may differ if an exact article already identifies the product.
-    return matched_article or bool(product['name'] and header(product['name'])==header(r['name']))
-
 def parse_response(raw,sheet,year,state):
     result=sheet_records(raw,sheet,['Дата подтвержденная','Дата ответа'],year)
     if 'sheets' in result:return result
     if any(header(h) in result['columns'] for h in ('№ части','Подтверждено, шт.')):
         raise ValueError('Шаблон устарел. Скачайте новый запрос по заказу: нужна одна дата готовности позиции, без количества и частей.')
-    byid={r['id']:r for r in state['rows']}
-    changes=[];errors=[];seen=set()
+    changes=[];errors=[];seen=set();name_warnings=[]
     for line,v in result['records']:
         g=lambda h:v.get(header(h))
         if all(g(x) in (None,'') for x in ['Дата подтвержденная','Дата ответа']):continue
@@ -133,8 +119,17 @@ def parse_response(raw,sheet,year,state):
             if not oid and not invoice:raise ValueError('Укажите номер заказа или номер счёта')
             if not any(product.values()):raise ValueError('Укажите артикул или наименование товара')
             quantity=number(g('Заказано, шт.'),'Заказано',False) if g('Заказано, шт.') not in (None,'') else None
-            pool=[byid[rid]] if rid in byid else [] if rid else state['rows']
-            candidates=[r for r in pool if response_match(r,oid,invoice,product,quantity)]
+            pool=[r for r in state['rows'] if (not oid or canonical_order(r.get('order'))==oid)
+                  and (not invoice or header(r.get('invoice'))==header(invoice))]
+            candidates, matched_article=article_candidates(product,pool)
+            if matched_article and not candidates:
+                raise ValueError('Артикул Комуса найден, но артикул ПРОМЕТ расходится с заказом.')
+            if not matched_article:
+                name_key=product_name_key(product['name'])
+                candidates=[r for r in candidates if name_key and name_key in
+                            (product_name_key(r['name']),product_name_key(r.get('prometName')))]
+            candidates=[r for r in candidates if (not rid or r['id']==rid)
+                        and (quantity is None or r['qty']==quantity)]
             if not candidates:raise ValueError('Не найден товар с указанным заказом / счётом, артикулом и количеством. Проверьте реквизиты.')
             if len(candidates)>1:raise ValueError('Найдено несколько одинаковых строк. Уточните счёт или исходное количество «Заказано, шт.», либо скачайте заполненный запрос из приложения.')
             r=candidates[0]
@@ -144,13 +139,23 @@ def parse_response(raw,sheet,year,state):
             if asof<r.get('replyAsOf',''):raise ValueError('Ответ старее уже сохранённого')
             if r['id'] in seen:raise ValueError('Позиция повторяется: оставьте одну строку с одной датой готовности.')
             seen.add(r['id']);validate_row(r)
-            changes.append({'rowId':r['id'],'order':r['order'],'invoice':r.get('invoice',''),'name':r['name'],
-                            'ready':ready,'asOf':asof,'shippedAtRequest':r['shipped']})
+            change={'rowId':r['id'],'order':r['order'],'invoice':r.get('invoice',''),'name':r['name'],
+                    'ready':ready,'asOf':asof,'shippedAtRequest':r['shipped']}
+            if matched_article:
+                for field in ('sku','komusSku'):
+                    if not r.get(field) and product[field]:
+                        change[field]=product[field]
+                if product['name'] and product['name']!=r['name']:
+                    if different_product_model(r.get('prometName') or r['name'],product['name']):
+                        name_warnings.append(f'Строка {line}: артикул совпал, но модель или числа в названии отличаются. Наименование для справочника не обновлено.')
+                    else:
+                        change['prometName']=product['name']
+            changes.append(change)
         except ValueError as e:errors.append({'line':line,'name':text(g('Наименование')),'reason':str(e)})
     return {'changes':changes,'errors':errors,'count':len(changes),'warnings':[
         'Одна дата готовности применяется ко всему неотгруженному остатку позиции. Количество берётся из сохранённого заказа.',
         'Строки без обеих дат не меняются. Чтобы снять прежнюю готовность, оставьте дату готовности пустой и укажите дату ответа.',
-        'Отгрузка только целыми паллетами; паллеты одной позиции можно распределять по разным дням.']}
+        'Отгрузка только целыми паллетами; паллеты одной позиции можно распределять по разным дням.']+name_warnings}
 
 def template_file(kind,rows=None):
     w=Workbook();s=w.active;s.title='Новый заказ' if kind=='order' else 'Ответ Донцовой'

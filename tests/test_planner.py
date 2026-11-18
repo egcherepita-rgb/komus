@@ -38,6 +38,21 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(workdays(date(2026,11,11),date(2026,11,16)),3)
     def test_ambiguous_catalog_and_dates_block(self):
         p=run([row(1,'A',26),row(2,'B',26,ready='')],[cat('A'),cat('A'),cat('B')]);self.assertEqual(len(p['issues']),2)
+    def test_catalog_without_articles_removes_prefix_but_preserves_model_suffix(self):
+        ordered=row(1,'Шкаф для раздевалок усиленный 0МХ_ML-11-50U (LS-11-50)',572)
+        correct=cat('Шкаф для раздевалок усиленный ML-11-50U (LS-11-50)',cap=22)
+        other=cat('Шкаф для раздевалок усиленный ML-11-50 (LS-11-50)',cap=11)
+        plan=run([ordered],[correct,other])
+        self.assertEqual({p['capacity'] for p in plan['trucks'][0]['pallets']},{22})
+        self.assertEqual(len(run([ordered],[other])['issues']),1)
+    def test_catalog_articles_override_name_and_block_conflicting_promet_article(self):
+        ordered=dict(row(1,'Название Комуса',572),komusSku='1436687',sku='S23099404602')
+        correct=cat('Название ПРОМЕТ',cap=22,komusSku='1436687',sku='S23099404602')
+        misleading=cat('Название Комуса',cap=11)
+        plan=run([ordered],[correct,misleading])
+        self.assertEqual({p['capacity'] for p in plan['trucks'][0]['pallets']},{22})
+        correct['sku']='S23099404603'
+        self.assertIn('Артикулы расходятся',run([ordered],[correct,misleading])['issues'][0]['reason'])
     def test_complex_and_odd_capacity_block(self):
         p=run([row(1,'A',26),row(2,'B',26)],[cat('A','split',3),cat('B',needsReview=True)])
         self.assertEqual(len(p['issues']),2);self.assertFalse(p['trucks'])
