@@ -73,6 +73,32 @@ class ServerTests(unittest.TestCase):
         ledger_store.mutate(server.DATA,0,lambda s:s.update(old))
         with self.assertRaises(urllib.error.HTTPError) as e:self.request(c,'/api/v2/export')
         self.assertEqual(e.exception.code,400)
+    def test_transition_and_reset_persist_without_clearing_recorded_shipments(self):
+        c=self.client()
+        initial=server.demo()
+        initial['rows'][0]['qty']=initial['rows'][0]['lots'][0]['qty']=1000
+        rev,_,_=ledger_store.mutate(server.DATA,0,lambda s:s.update(initial))
+        payload={'id':'demo1','operation':'reserve','quantity':120,'revision':rev}
+        reserved=json.load(self.request(c,'/api/v2/row-transition',payload))
+        self.assertIsNone(reserved['state']['plan'])
+        payload.update(operation='ship',quantity=20,actualDate='2026-11-17',revision=reserved['revision'])
+        shipped=json.load(self.request(c,'/api/v2/row-transition',payload))
+        with self.assertRaises(urllib.error.HTTPError) as ex:
+            self.request(c,'/api/v2/row-transition',payload)
+        self.assertEqual(ex.exception.code,409)
+        built=json.load(self.request(c,'/api/v2/build',{'revision':shipped['revision']}))
+        plan=built['state']['plan']
+        truck=plan['trucks'][0]
+        sent=json.load(self.request(c,'/api/v2/dispatch',{
+            'revision':built['revision'],'planId':plan['id'],'truckId':truck['id'],'actualDate':'2026-11-17'}))
+        with self.assertRaises(urllib.error.HTTPError) as ex:
+            self.request(c,'/api/v2/clear-plan',{'revision':sent['revision'],'planId':plan['id']})
+        self.assertEqual(ex.exception.code,400)
+        json.load(self.request(c,'/api/v2/clear-plan',{'revision':sent['revision'],'planId':sent['state']['plan']['id']}))
+        after=json.load(self.request(c,'/api/v2/state'))['state']
+        self.assertIsNone(after['plan'])
+        for key in ('rows','catalog','shipments','manualShipments','reconciled'):
+            self.assertEqual(after[key],sent['state'][key])
     def test_readiness_build_dispatch_and_persistent_remaining_via_http(self):
         c=self.client();rev=0
         def upload(raw,kind,sheet):

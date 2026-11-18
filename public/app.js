@@ -8,6 +8,7 @@ const types={single:'Красная 0,5',double:'Чёрная 1',split:'Крас
 const importNames={initial:'Первоначальный файл отгрузок',catalog:'Кратность Тула',order:'Новый заказ Комуса',response:'Ответ Донцовой'};
 let state=null,revision=0,busy=false,month=today().slice(0,7),uploadKind='',uploadToken=null,uploadGeneration=0,editing=null,dispatching=null;
 let layouts=[],layoutsLoading=null;
+let rowTransition=null,planToClear=null;
 function banner(message,error=false){$('banner').hidden=!message;$('banner').textContent=message||'';$('banner').classList.toggle('error',error);}
 function lock(value){busy=value;document.querySelectorAll('.mutation').forEach(b=>b.disabled=value||readOnly);if(!value&&$('uploadDialog').open)$('applyImport').disabled=readOnly||!uploadToken;}
 async function request(path,{body,raw=false}={}){
@@ -46,7 +47,7 @@ async function loadLayouts(){
 }
 async function openLayout(id){tab('layouts');await loadLayouts();layouts.forEach(l=>$('layout-'+l.id).classList.toggle('selected',l.id===id));const card=$('layout-'+id);if(card){card.scrollIntoView({behavior:'smooth',block:'center'});card.focus({preventScroll:true});}}
 function truckHtml(t,history=false){return `<article class="panel truck ${history?'shipment':''}"><div class="truck-top"><div class="truck-name"><span class="truck-number">${String(t.id).padStart(2,'0')}</span><div><h3>Машина № ${t.id} <span class="tag">${history?'Отгружена':'Полная укладка'}</span></h3><p>${datefmt(history?t.actualDate:t.date)} · Рейс ${t.slot} · Схема ${t.layout.id}${t.secondReason?' · '+esc(t.secondReason):''}</p></div></div><button class="tag purple layout-link" data-layout="${t.layout.id}" aria-label="Показать схему укладки № ${t.layout.id}">Схема № ${t.layout.id} · ${t.layout.doubles} × 1 + ${t.layout.singles} × 0,5 ↗</button></div>${diagram(t,history)}<div class="diagram-caption"><span>КАБИНА ← · Нажмите паллету, чтобы открыть товар и заказ</span><span>${(t.layout.length/1000).toFixed(1)} / 13,5 м</span></div><details open><summary>Состав · ${summary(t).length} поз. · ${fmt(sumTruck(t))} шт.</summary><div class="table-wrap">${table(['Заказ','Счёт','Товар / артикул','Количество','Мест','Особенности'],summary(t).map(p=>[esc(p.order),esc(p.invoice),esc(p.name)+`<small class="row-note">${esc(p.sku||p.komusSku||'')}</small>`,`<strong>${fmt(p.qty)} шт.</strong>`,String(p.places),[p.vertical?'ВП':'',p.partialCount?'Неполных паллет: '+p.partialCount:'',p.type==='loose'?'Без места: '+esc(p.fixation):''].filter(Boolean).join(' · ')]))}</div></details>${history?`<p class="muted">Фактически отправлено ${datefmt(t.actualDate)}. В остатках заказов уже учтено.</p>`:`<div class="truck-actions"><span>Планирование не списывает товар. Отмечайте только после реальной отправки.</span><button class="mutation" data-dispatch="${t.id}">Отметить отгруженной</button></div>`}</article>`;}
-function renderPlan(){const p=state.plan;$('statTrucks').textContent=p?p.trucks.length:'—';$('statRemaining').textContent=fmt(state.totals.remaining);$('statConfirmed').textContent=fmt(state.totals.confirmed);$('statShipped').textContent=fmt(state.totals.shipped);$('start').value=state.settings.start;$('strategy').value=state.settings.strategy;
+function renderPlan(){const p=state.plan;$('clearPlan').hidden=!p||readOnly;$('statTrucks').textContent=p?p.trucks.length:'—';$('statRemaining').textContent=fmt(state.totals.remaining);$('statConfirmed').textContent=fmt(state.totals.confirmed);$('statShipped').textContent=fmt(state.totals.shipped);$('start').value=state.settings.start;$('strategy').value=state.settings.strategy;
  $('setupSteps').innerHTML=[['initial','1. Первоначальный файл',state.bootstrap||state.rows.length?'Журнал сохранён':'Загрузить один раз',!!state.bootstrap||!!state.rows.length],['catalog','2. Кратность Тула',state.catalog.length?state.catalog.length+' товаров · хранится постоянно':'Загрузить справочник',!!state.catalog.length],['orders','3. Новые заказы',state.orders.length+' заказов · добавляются к журналу',!!state.orders.length],['responses','4. Ответы Донцовой',state.totals.confirmed?fmt(state.totals.confirmed)+' шт. с готовностью':'Загрузить подтверждения',!!state.totals.confirmed]].map(([dest,title,note,done])=>`<button class="setup-card ${done?'done':'todo'}" data-tab="${dest}"><strong>${title}</strong><span>${note}</span></button>`).join('');
  $('reconcileBox').hidden=state.reconciled||!state.rows.length;$('exportPlan').disabled=!p||!p.wholePalletsOnly||p.readinessMode!=='position';$('printPlan').disabled=!p||!p.wholePalletsOnly||p.readinessMode!=='position';
  if(p&&(!p.wholePalletsOnly||p.readinessMode!=='position')){$('planResults').innerHTML='<div class="panel help"><h2>Пересоберите машины по дате готовности позиции</h2><p>Нажмите «Собрать машины». Загруженные заказы, готовность и история отправок сохранены. На позицию используется одна дата готовности. Количество берётся из заказа, отгрузка — целыми паллетами.</p></div>';return;}
@@ -58,13 +59,31 @@ function renderOrders(){const old=$('orderSelect').value;$('orderSelect').innerH
 function filterOrders(){if(!state)return;const selected=$('orderSelect').value,q=$('orderSearch').value.trim().toLowerCase();const rows=state.rows.filter(r=>(!selected||r.order===selected)&&[r.order,r.invoice,r.name,r.sku,r.komusSku].join(' ').toLowerCase().includes(q));
  $('downloadOrderReply').disabled=!selected||readOnly;
  $('ordersSummary').innerHTML=state.orders.filter(o=>!selected||o.order===selected).map(o=>`<div class="order-card"><strong>Заказ ${esc(o.order)}</strong><span>${o.lines} поз. · осталось ${fmt(o.remaining)} шт.</span><p>С датой готовности: ${fmt(o.confirmed)} шт.<br>Отгружено: ${fmt(o.shipped)} шт.<br>Срок: ${datefmt(o.due)}</p>${o.issues?`<span class="tag amber">Проверить: ${o.issues}</span>`:''}</div>`).join('');
- $('ordersTable').innerHTML=table(['Заказ','Счёт','Товар / артикулы','Заказано','Отгружено','Остаток','Дата готовности всей позиции','Отгрузить до','Действие'],rows.map(r=>[esc(r.order),esc(r.invoice),esc(r.name)+`<small class="row-note">Промет: ${esc(r.sku||'—')} · Комус: ${esc(r.komusSku||'—')}</small>`,fmt(r.qty),fmt(r.shipped),fmt(r.qty-r.shipped),r.ready?datefmt(r.ready):`<span class="tag amber">${r.readinessNeedsReview?'Уточнить одну дату позиции':'Нет даты готовности'}</span>`,datefmt(r.due),`<button class="compact-action mutation" data-edit-row="${r.id}">Проверить / исправить</button>`]),'Заказов пока нет. Загрузите первоначальный файл или новый заказ по шаблону.');if(readOnly)lock(false);
+ $('ordersTable').innerHTML=table(['Заказ','Счёт','Товар / артикулы','Заказано','Отгружено','Остаток','Дата готовности всей позиции','Отгрузить до','Действие'],rows.map(r=>[esc(r.order),esc(r.invoice),esc(r.name)+`<small class="row-note">Промет: ${esc(r.sku||'—')} · Комус: ${esc(r.komusSku||'—')}</small>`,fmt(r.qty),fmt(r.shipped),fmt(r.qty-r.shipped)+(r.reserved?`<small class="row-note">В готовой машине: ${fmt(r.reserved)} шт.</small>`:''),r.ready?datefmt(r.ready):`<span class="tag amber">${r.readinessNeedsReview?'Уточнить одну дату позиции':'Нет даты готовности'}</span>`,datefmt(r.due),orderRowActions(r)]),'Заказов пока нет. Загрузите первоначальный файл или новый заказ по шаблону.');if(readOnly)lock(false);
+}
+function orderRowActions(row){
+ const id=esc(row.id);
+ const edit=`<button class="compact-action mutation" data-edit-row="${id}">Проверить / исправить</button>`;
+ if(readOnly)return edit;
+ if(row.shipped===row.qty)return '<span class="tag">Отгружено</span>'+edit;
+ return `<div class="actions">
+  <button class="compact-action mutation" data-ship-row="${id}">Отгружено</button>
+  <button class="compact-action mutation" data-reserve-row="${id}">В готовой машине</button>
+  ${edit}
+ </div>`;
 }
 function renderResponses(){const rows=state.rows.filter(r=>r.ready||r.replyAsOf||r.readinessNeedsReview);$('responsesTable').innerHTML=table(['Заказ','Счёт','Товар','Дата ответа','Дата готовности всей позиции'],rows.map(r=>[esc(r.order),esc(r.invoice),esc(r.name),r.replyAsOf?datefmt(r.replyAsOf):'Из первоначального файла',r.ready?datefmt(r.ready):r.readinessNeedsReview?'Нужна одна дата на всю позицию':'Дата готовности не указана']));$('responseFiles').innerHTML=fileTable(state.imports.filter(h=>h.kind==='response'));}
 function renderCatalog(){const q=$('catalogSearch').value.toLowerCase();$('catalogMeta').textContent=state.catalog.length?`В журнале ${state.catalog.length} товаров. Последнее обновление: ${datefmt(state.catalogUpdated)}. Перезагружать при каждом входе не нужно.`:'Загрузите справочник Тула один раз. Затем обновляйте только по мере изменений.';
  $('catalogTable').innerHTML=table(['Товар','Тип','Кратность','ВП','Проверка','Крепление для 0','Действие'],state.catalog.map((r,i)=>({...r,i})).filter(r=>r.name.toLowerCase().includes(q)).map(r=>[esc(r.name),esc(types[r.type]),String(r.capacity),r.vertical?'ВП':'—',r.needsReview?`<span class="tag amber">Проверить: ${esc(r.original||'кратность')}</span>`:'—',esc(r.fixation||''),`<button class="compact-action mutation" data-edit-catalog="${r.i}">Исправить</button>`]));if(readOnly)lock(false);}
 function renderInitial(){const b=state.bootstrap;const started=!!b||!!state.rows.length;$('initialPanel').innerHTML=started?`<h2>Первоначальные данные уже сохранены</h2><span class="tag">Журнал ведётся на сервере</span><p>${esc(b?.filename||'Журнал начат с новых заказов')}${b?.at?' · '+datefmt(b.at):''}</p><p>Повторно загружать весь файл не нужно. Новые заказы добавляйте в «Заказы Комуса», готовность — в «Ответы Донцовой». Отправленные машины отмечайте в плане.</p>${b?.sha?`<button data-download="/api/v2/source?sha=${esc(b.sha)}">Скачать первоначальный файл</button>`:''}`:`<h2>Загрузите действующий файл отгрузок Комуса</h2><p>Выберите актуальный лист и укажите, содержатся ли в нём исходные количества или уже чистые остатки. После проверки файл и строки останутся на сервере.</p><button class="primary mutation" data-import="initial">Загрузить первоначальный файл</button>`;$('importFiles').innerHTML=fileTable(state.imports);}
-function renderHistory(){$('shipments').innerHTML=state.shipments.slice().reverse().map(t=>truckHtml(t,true)).join('')||'<div class="panel help"><h2>Фактических отгрузок ещё нет</h2><p>После реальной отправки машины отметьте её на экране «Машины». Приложение спишет количество и сохранит состав здесь.</p></div>';}
+function renderHistory(){
+ const manual=(state.manualShipments||[]).slice().reverse();
+ $('manualShipmentHistory').hidden=!manual.length;
+ if(manual.length)$('manualShipmentHistory').innerHTML='<div class="panel-heading"><h2>Отгрузки по позициям</h2></div>'+
+  table(['Дата','Заказ','Счёт','Товар','Отгружено, шт.'],manual.map(entry=>[
+   datefmt(entry.actualDate),esc(entry.order),esc(entry.invoice),esc(entry.name),fmt(entry.qty)
+  ]));
+ $('shipments').innerHTML=state.shipments.slice().reverse().map(t=>truckHtml(t,true)).join('')||'<div class="panel help"><h2>В истории пока нет отгруженных машин</h2><p>Состав машины появится здесь после отметки об отправке в плане.</p></div>';}
 function renderCalendar(){if(!state)return;const[y,m]=month.split('-').map(Number),first=new Date(y,m-1,1,12),offset=(first.getDay()+6)%7,days=new Date(y,m,0).getDate();$('monthTitle').textContent=new Intl.DateTimeFormat('ru-RU',{month:'long',year:'numeric'}).format(first);let html=['ПН','ВТ','СР','ЧТ','ПТ','СБ','ВС'].map(d=>`<div class="weekday">${d}</div>`).join('');for(let i=0;i<offset;i++)html+='<div class="calendar-day weekend"></div>';
  for(let n=1;n<=days;n++){const day=`${y}-${String(m).padStart(2,'0')}-${String(n).padStart(2,'0')}`,trucks=state.plan?.wholePalletsOnly&&state.plan.readinessMode==='position'?state.plan.trucks.filter(t=>t.date===day):[],sent=state.shipments.filter(t=>t.actualDate===day);html+=`<div class="calendar-day ${(offset+n-1)%7>4?'weekend':''} ${day===today()?'today':''}"><span class="date-num">${n}</span>${trucks.length?`<span class="tag purple">План: ${trucks.length} маш.</span>`:''}${sent.length?`<span class="tag">Отгружено: ${sent.length}</span>`:''}${trucks.map(t=>`<button class="calendar-event" data-calendar="${t.id}"><strong>Машина № ${t.id}</strong><small>${fmt(sumTruck(t))} шт. · ${summary(t).length} поз.</small><small>${summary(t).map(p=>p.order).join(', ')}</small></button>`).join('')}${sent.map(t=>`<button class="calendar-event" data-history-card="${t.shipmentId}"><strong>✓ Отгружена № ${t.id}</strong><small>${fmt(sumTruck(t))} шт.</small></button>`).join('')}</div>`;}
  for(let i=(offset+days)%7;i>0&&i<7;i++)html+='<div class="calendar-day weekend"></div>';$('calendarGrid').innerHTML=html;$('calendarCaption').textContent=state.plan?.wholePalletsOnly&&state.plan.readinessMode==='position'?'Нажмите машину, чтобы открыть состав и паллеты. Зелёным отмечены фактические отгрузки.':'План ещё не собран. После расчёта машины появятся на своих датах.';$('calendarDetails').innerHTML='';}
@@ -112,7 +131,7 @@ async function previewFile(){
 }
 
 function field(label,key,value,type='text',options={}){return `<label class="${options.wide?'wide':''}">${esc(label)}<input name="${key}" type="${type}" value="${esc(value??'')}" ${options.readonly?'readonly':''} ${type==='number'?'min="0" max="1000000" step="1"':''}></label>`;}
-function editRow(id){const r=state.rows.find(x=>x.id===id);editing={kind:'row',id};$('editTitle').textContent='Проверка позиции заказа';const locked=state.shipments.some(t=>t.pallets.concat(t.loose).some(p=>p.rowId===id));$('editFields').innerHTML=field('Номер заказа','order',r.order)+field('Номер счёта','invoice',r.invoice)+field('Артикул Промет','sku',r.sku)+field('Артикул Комуса','komusSku',r.komusSku)+field('Отгрузить до','due',r.due,'date')+field('Наименование','name',r.name,'text',{wide:true})+field('Заказано, шт.','qty',r.qty,'number')+field('Фактически отгружено до начала учёта','shipped',r.shipped,'number',{readonly:locked})+`<p class="muted wide">Дата готовности всей позиции: ${r.ready?datefmt(r.ready):'не указана'}. Дата обновляется ответом Донцовой. При изменении количества готовность этой позиции сбросится: потребуется свежий ответ Донцовой. После правки нужна повторная сверка остатков.</p>`;$('editError').textContent='';$('editDialog').showModal();if(readOnly)lock(false);}
+function editRow(id){const r=state.rows.find(x=>x.id===id);editing={kind:'row',id};$('editTitle').textContent='Проверка позиции заказа';const locked=state.shipments.some(t=>t.pallets.concat(t.loose).some(p=>p.rowId===id))||(state.manualShipments||[]).some(entry=>entry.rowId===id);$('editFields').innerHTML=field('Номер заказа','order',r.order)+field('Номер счёта','invoice',r.invoice)+field('Артикул Промет','sku',r.sku)+field('Артикул Комуса','komusSku',r.komusSku)+field('Отгрузить до','due',r.due,'date')+field('Наименование','name',r.name,'text',{wide:true})+field('Заказано, шт.','qty',r.qty,'number')+field('Фактически отгружено до начала учёта','shipped',r.shipped,'number',{readonly:locked})+`<p class="muted wide">Дата готовности всей позиции: ${r.ready?datefmt(r.ready):'не указана'}. Дата обновляется ответом Донцовой. При изменении количества готовность этой позиции сбросится: потребуется свежий ответ Донцовой. После правки нужна повторная сверка остатков.</p>`;$('editError').textContent='';$('editDialog').showModal();if(readOnly)lock(false);}
 function editCatalog(index){const r=state.catalog[index];editing={kind:'catalog',index};$('editTitle').textContent='Кратность товара';$('editFields').innerHTML=field('Наименование','name',r.name,'text',{wide:true})+`<label>Тип паллеты<select name="type">${Object.entries(types).map(([k,v])=>`<option value="${k}" ${r.type===k?'selected':''}>${v}</option>`).join('')}</select></label>`+field('Кратность отгрузки, шт.','capacity',r.capacity,'number')+`<label class="check-field"><input name="vertical" type="checkbox" ${r.vertical?'checked':''}> Вертикальное паллетирование (ВП)</label><label class="check-field"><input name="needsReview" type="checkbox" ${r.needsReview?'checked':''}> Требует проверки</label>`+field('Крепление / размещение для 0','fixation',r.fixation,'text',{wide:true})+`<p class="muted wide">Исходная запись: ${esc(r.original||'—')}. Для красной 1 введите подтверждённое количество на сдвоенный паллет. Простое числовое значение программа разделит пополам. Для груза с маркером 0 также нужна положительная кратность отгрузки; неполные паллеты не отправляются.</p>`;$('editError').textContent='';$('editDialog').showModal();if(readOnly)lock(false);}
 async function boot(){if(!readOnly){const s=await request('session');if(!s.authenticated)return;}$('login').hidden=true;$('shell').hidden=false;await loadState();if(state.plan?.trucks[0])month=state.plan.trucks[0].date.slice(0,7);renderCalendar();if(readOnly){banner('Демонстрация · вымышленные данные. Для своего журнала войдите в приложение.');$('logout').textContent='Войти';$('logout').onclick=()=>location.href='/';}}
 $('loginForm').onsubmit=async e=>{e.preventDefault();try{await request('login',{body:{password:$('password').value}});$('password').value='';$('loginError').textContent='';await boot();}catch(e){$('loginError').textContent=e.message;}};
@@ -127,11 +146,67 @@ $('uploadFile').onchange=()=>{$('uploadSheetBox').hidden=true;$('uploadSheet').i
 $('applyImport').onclick=async()=>{if(!uploadToken)return;try{const result=await action('import-apply',{token:uploadToken});if(result){$('uploadDialog').close();uploadToken=null;}}catch(e){uploadError(e);}};
 $('editForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target);try{if(editing.kind==='row'){const changes=Object.fromEntries(f);changes.qty=Number(changes.qty);changes.shipped=Number(changes.shipped);await action('row',{id:editing.id,changes});}else{const old=state.catalog[editing.index],item={...old,...Object.fromEntries(f),capacity:Number(f.get('capacity')),vertical:f.has('vertical'),needsReview:f.has('needsReview')};await action('catalog-row',{index:editing.index,item});}$('editDialog').close();}catch(e){$('editError').textContent=e.message;}};
 $('dispatchForm').onsubmit=async e=>{e.preventDefault();try{await action('dispatch',{planId:state.plan.id,truckId:dispatching,actualDate:$('actualDate').value});$('dispatchDialog').close();}catch(e){$('dispatchError').textContent=e.message;}};
+function openRowTransition(id,operation){
+ const row=state.rows.find(row=>row.id===id);
+ if(!row||readOnly||busy)return;
+ const remaining=row.qty-row.shipped;
+ if(remaining<=0)return;
+ const isShipment=operation==='ship';
+ rowTransition={id,operation,revision};
+ $('rowTransitionTitle').textContent=isShipment?'Отметить отгрузку':'Товар в готовой машине';
+ $('rowTransitionDescription').textContent=`Заказ ${row.order} · ${row.name}. Остаток: ${fmt(remaining)} шт.`+
+  (row.reserved?` В готовой машине: ${fmt(row.reserved)} шт.`:'');
+ $('rowTransitionQtyLabel').textContent=isShipment?'Отправлено сейчас, шт.':'Всего в готовой машине, шт.';
+ const quantity=$('rowTransitionQty');
+ quantity.min=isShipment?'1':'0';
+ quantity.max=remaining;
+ quantity.value=row.reserved||remaining;
+ $('rowTransitionDateLabel').hidden=!isShipment;
+ $('rowTransitionDate').required=isShipment;
+ $('rowTransitionDate').value=today();
+ $('rowTransitionDate').max=today();
+ $('rowTransitionHint').textContent=isShipment
+  ? 'Укажите количество за эту отправку. Если товар был в готовой машине, приложение сначала спишет его оттуда.'
+  : 'Это количество исключается из сборки новых машин. Введите 0, чтобы вернуть товар в расчёт.';
+ if(state.plan)$('rowTransitionHint').textContent+=' После сохранения изменения соберите план машин заново.';
+ $('saveRowTransition').textContent=isShipment?'Подтвердить отгрузку':'Сохранить количество';
+ $('rowTransitionError').textContent='';
+ $('rowTransitionDialog').showModal();
+}
+$('rowTransitionForm').onsubmit=async event=>{
+ event.preventDefault();
+ if(!rowTransition||busy)return;
+ if(rowTransition.revision!==revision){
+  $('rowTransitionError').textContent='Журнал изменился. Закройте окно и заново откройте действие для этой позиции.';
+  return;
+ }
+ const {id,operation}=rowTransition;
+ const data={id,operation,quantity:Number($('rowTransitionQty').value)};
+ if(operation==='ship')data.actualDate=$('rowTransitionDate').value;
+ try{
+  if(await action('row-transition',data))$('rowTransitionDialog').close();
+ }catch(error){$('rowTransitionError').textContent=error.message;}
+};
+$('clearPlan').onclick=()=>{
+ if(!state?.plan||readOnly||busy)return;
+ planToClear=state.plan.id;
+ $('clearPlanError').textContent='';
+ $('clearPlanDialog').showModal();
+};
+$('clearPlanForm').onsubmit=async event=>{
+ event.preventDefault();
+ if(busy)return;
+ try{
+  if(await action('clear-plan',{planId:planToClear}))$('clearPlanDialog').close();
+ }catch(error){$('clearPlanError').textContent=error.message;}
+};
 function shiftMonth(delta){const[y,m]=month.split('-').map(Number),d=new Date(y,m-1+delta,1,12);month=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');renderCalendar();}$('prevMonth').onclick=()=>shiftMonth(-1);$('nextMonth').onclick=()=>shiftMonth(1);$('printCalendar').onclick=$('printPlan').onclick=()=>window.print();
 $('printLayouts').onclick=()=>window.print();$('retryLayouts').onclick=()=>loadLayouts().catch(()=>{});
 document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b||b.disabled)return;
  if(b.dataset.layout)openLayout(Number(b.dataset.layout)).catch(()=>{});
  if(b.dataset.tab)tab(b.dataset.tab);if(b.dataset.close)$(b.dataset.close).close();if(b.dataset.download)download(b.dataset.download);if(b.dataset.import)showUpload(b.dataset.import);if(b.dataset.editRow)editRow(b.dataset.editRow);if(b.dataset.editCatalog!==undefined)editCatalog(Number(b.dataset.editCatalog));
+ if(b.dataset.shipRow)openRowTransition(b.dataset.shipRow,'ship');
+ if(b.dataset.reserveRow)openRowTransition(b.dataset.reserveRow,'reserve');
  if(b.dataset.dispatch){dispatching=Number(b.dataset.dispatch);const t=state.plan.trucks.find(t=>t.id===dispatching);$('dispatchDescription').textContent=`Машина № ${t.id}: ${fmt(sumTruck(t))} шт., ${summary(t).length} позиций. Плановая дата ${datefmt(t.date)}.`;$('actualDate').value=today();$('actualDate').max=today();$('dispatchError').textContent='';$('dispatchDialog').showModal();}
  if(b.dataset.calendar||b.dataset.historyCard){const hist=!!b.dataset.historyCard,t=hist?state.shipments.find(t=>t.shipmentId===b.dataset.historyCard):state.plan.trucks.find(t=>t.id===Number(b.dataset.calendar));$('calendarDetails').innerHTML=truckHtml(t,hist);sizes();lock(busy);$('calendarDetails').scrollIntoView({behavior:'smooth',block:'start'});}
  if(b.dataset.pallet!==undefined){const t=b.dataset.shipment?state.shipments.find(t=>t.shipmentId===b.dataset.shipment):state.plan.trucks.find(t=>t.id===Number(b.dataset.truck));const p=t.pallets[Number(b.dataset.pallet)];$('palletDetail').innerHTML=`<span class="eyebrow">МАШИНА № ${t.id} · МЕСТО ${Number(b.dataset.pallet)+1}</span><h2>${esc(p.name)}</h2><p><strong>${fmt(p.qty)} шт.</strong>${p.vertical?' · ВП':''}</p><p>Заказ: ${esc(p.order)}<br>Счёт: ${esc(p.invoice)}<br>Артикул: ${esc(p.sku||p.komusSku||'—')}</p><p>Готовность: ${datefmt(p.ready)}<br>Отгрузить до: ${datefmt(p.due)}</p>${p.partial?'<p class="tag amber">Паллета заполнена частично, занимает целое место.</p>':''}`;$('palletDialog').showModal();}

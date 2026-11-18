@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 
-// Execute the real client upload handlers with an isolated DOM/API adapter.
+// Execute the real client handlers with an isolated DOM/API adapter.
 // No browser session, customer workbook, or production data is involved.
 function client({ upload = true } = {}) {
   const elements = new Map(), calls = [], replies = [];
@@ -103,6 +103,37 @@ test('apply sends only the successfully checked token, then closes the dialog', 
 const allLayouts = JSON.parse(require('node:child_process').execFileSync('python', [
   '-c', 'from planner import LAYOUTS; import json; print(json.dumps(LAYOUTS))',
 ], { cwd: path.join(__dirname, '..'), encoding: 'utf8' }));
+
+test('manual shipment uses the quantity for this shipment and confirms before saving', async () => {
+  const c = client({ upload: false });
+  c.run("state={rows:[{id:'row1',order:'QA-1',name:'Товар',qty:50,shipped:10,reserved:20}]}; revision=4; render=()=>{}");
+  c.run("openRowTransition('row1','ship')");
+  assert.equal(c.element('rowTransitionQty').max, 40);
+  assert.equal(c.element('rowTransitionQty').value, 20);
+  assert.equal(c.element('rowTransitionDialog').open, true);
+  assert.equal(c.calls.length, 0);
+  c.element('rowTransitionQty').value = '10';
+  c.element('rowTransitionDate').value = '2026-11-17';
+  c.replies.push({ revision: 5, state: {}, result: {} });
+  await c.run("$('rowTransitionForm').onsubmit({preventDefault(){}})");
+  assert.equal(c.calls[0].url, '/api/v2/row-transition');
+  assert.deepEqual(JSON.parse(c.calls[0].options.body), {
+    id: 'row1', revision: 4, operation: 'ship', quantity: 10, actualDate: '2026-11-17',
+  });
+  assert.equal(c.element('rowTransitionDialog').open, false);
+});
+
+test('clear plan is sent only after confirmation and targets the selected plan', async () => {
+  const c = client({ upload: false });
+  c.run("state={plan:{id:'plan-A'}}; revision=4; render=()=>{}; $('clearPlan').onclick()");
+  assert.equal(c.element('clearPlanDialog').open, true);
+  assert.equal(c.calls.length, 0);
+  c.replies.push({ revision: 5, state: { plan: null }, result: {} });
+  await c.run("$('clearPlanForm').onsubmit({preventDefault(){}})");
+  assert.equal(c.calls[0].url, '/api/v2/clear-plan');
+  assert.deepEqual(JSON.parse(c.calls[0].options.body), { revision: 4, planId: 'plan-A' });
+  assert.equal(c.element('clearPlanDialog').open, false);
+});
 
 test('layouts tab renders all twelve planner layouts and reuses its read-only response', async () => {
   const c = client({ upload: false }); c.replies.push(allLayouts);

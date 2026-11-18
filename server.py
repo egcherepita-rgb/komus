@@ -8,6 +8,7 @@ from planner import build_plan, LAYOUTS
 from importer import catalog_import, export_plan
 import ledger_store
 from workflow import empty_state,public_state,make_plan,apply_import,update_row,dispatch,now,today,canonical_order,validate_row
+from workflow import clear_plan, transition_row
 from import_v2 import parse_initial,parse_order,parse_response,template_file
 from planner import number,normalize
 
@@ -169,6 +170,9 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:PREVIEWS.pop(token,None)
             elif path=='/api/v2/row':
                 rev,state,result=ledger_store.mutate(DATA,expected,lambda s:update_row(s,data['id'],data['changes']))
+            elif path=='/api/v2/row-transition':
+                rev,state,result=ledger_store.mutate(DATA,expected,lambda s:transition_row(
+                    s,data['id'],data['operation'],data['quantity'],data.get('actualDate')))
             elif path=='/api/v2/reconcile':
                 def reconcile(s):
                     for r in s['rows']:validate_row(r)
@@ -194,6 +198,8 @@ class Handler(BaseHTTPRequestHandler):
                 rev,state,result=ledger_store.mutate(DATA,expected,build)
             elif path=='/api/v2/dispatch':
                 rev,state,result=ledger_store.mutate(DATA,expected,lambda s:dispatch(s,data['planId'],number(data['truckId'],'Машина',False),data['actualDate']))
+            elif path=='/api/v2/clear-plan':
+                rev,state,result=ledger_store.mutate(DATA,expected,lambda s:clear_plan(s,data['planId']))
             else:return self.send(410,{'error':'Откройте новую версию приложения и обновите страницу (Ctrl+F5).'})
             return self.send(200,envelope(rev,state,result))
         except ledger_store.Conflict as e:self.send(409,{'error':str(e)})

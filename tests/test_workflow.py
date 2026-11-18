@@ -28,6 +28,40 @@ class WorkflowTests(unittest.TestCase):
     def setUp(self):
         for target in ('workflow.today','import_v2.today'):
             p=patch(target,return_value=TODAY);p.start();self.addCleanup(p.stop)
+    def test_reserve_and_manual_dispatch_keep_prepared_stock_out_of_generated_trucks(self):
+        s=state()
+        row=s['rows'][0]
+        row.update(qty=800,lots=[{'part':'1','qty':800,'ready':TODAY}])
+        wf.make_plan(s)
+        wf.transition_row(s,'r1','reserve',540)
+        self.assertIsNone(s['plan'])
+        self.assertEqual(row['shipped'],0)
+        plan=wf.make_plan(s)
+        self.assertEqual(len(plan['trucks']),1)
+        self.assertEqual(sum(p['qty'] for p in plan['trucks'][0]['pallets']),260)
+        self.assertTrue(any(x['rowId']=='r1' and x['qty']==540 for x in plan['leftovers']))
+        wf.dispatch(s,plan['id'],plan['trucks'][0]['id'],TODAY)
+        self.assertEqual((row['shipped'],row['reserved']),(260,540))
+        self.assertEqual(s['plan']['trucks'],[])
+        wf.transition_row(s,'r1','ship',280,TODAY)
+        self.assertEqual((row['shipped'],row['reserved'],wf.position_ready(row)),(540,260,TODAY))
+        self.assertEqual(s['manualShipments'][0]['qty'],280)
+        self.assertEqual(len(s['shipments']),1)
+        self.assertTrue(s['reconciled'])
+        self.assertFalse(wf.make_plan(s)['trucks'])
+        wf.transition_row(s,'r1','reserve',0)
+        self.assertEqual(sum(p['qty'] for t in wf.make_plan(s)['trucks'] for p in t['pallets']),260)
+    def test_manual_dispatch_needs_no_readiness_and_validates_remaining_quantity(self):
+        s=state()
+        for qty,day in [(261,TODAY),(0,TODAY),(20,'2099-01-01')]:
+            before=deepcopy(s)
+            with self.assertRaises(ValueError):
+                wf.transition_row(s,'r1','ship',qty,day)
+            self.assertEqual(s,before)
+        wf.transition_row(s,'r1','ship',260,TODAY)
+        self.assertEqual(s['rows'][0]['shipped'],260)
+        self.assertFalse(any(x['rowId']=='r1' for x in wf.make_plan(s)['leftovers']))
+        self.assertEqual(s['rows'][1]['shipped'],0)
     def test_same_product_in_two_orders_updates_only_target(self):
         s=state();p=parsed_reply(s,[response(s['rows'][0])])
         self.assertFalse(p['errors']);wf.apply_import(s,'response',p,meta('response'))

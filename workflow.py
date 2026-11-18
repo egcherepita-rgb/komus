@@ -27,6 +27,8 @@ def validate_row(r):
     if not clean(r.get('name')): raise ValueError('Укажите наименование')
     qty=number(r.get('qty'),'Заказано',False); shipped=number(r.get('shipped',0),'Уже отгружено')
     if shipped>qty: raise ValueError('Отгружено больше заказанного')
+    if number(r.get('reserved',0),'В готовой машине')>qty-shipped:
+        raise ValueError('Количество в готовой машине превышает неотгруженный остаток')
     if r.get('due'):
         try:date.fromisoformat(r['due'])
         except (ValueError,TypeError):raise ValueError('Некорректная дата «Отгрузить до»')
@@ -135,15 +137,63 @@ def update_row(state,rid,changes):
     if set(changes)-allowed:raise ValueError('Неизвестное поле позиции')
     candidate=deepcopy(r);candidate.update(changes);candidate['order']=canonical_order(candidate.get('order'))
     # Shipment history is authoritative after the first recorded dispatch.
-    has_history=any(any(p['rowId']==rid for p in t['pallets']+t['loose']) for t in state['shipments'])
+    has_history=any(p['rowId']==rid for t in state['shipments'] for p in t['pallets']+t['loose'])
+    has_history=has_history or any(entry['rowId']==rid for entry in state.get('manualShipments',[]))
     if has_history:
-        if candidate['shipped']!=r['shipped']:raise ValueError('Количество отправленного ведётся по журналу машин и не редактируется вручную.')
-        if any(candidate.get(k)!=r.get(k) for k in ('order','position','name','invoice','sku','komusSku')):raise ValueError('Реквизиты позиции с фактической отгрузкой изменять нельзя: они связаны с историей машины.')
+        if candidate['shipped']!=r['shipped']:raise ValueError('Количество отправленного учтено в истории отгрузок. Для новой отправки нажмите «Отгружено».')
+        if any(candidate.get(k)!=r.get(k) for k in ('order','position','name','invoice','sku','komusSku')):raise ValueError('Реквизиты позиции с фактической отгрузкой связаны с историей отгрузок.')
     if 'lots' not in changes and any(candidate.get(k)!=r.get(k) for k in ('qty','shipped')):
         candidate['lots']=[];candidate['replyAsOf']='';candidate['replyComment']='Количество исправлено вручную: требуется новое подтверждение остатка.'
     validate_row(candidate)
     if any(x['id']!=rid and key(x.get('order'),x.get('position'))==key(candidate['order'],candidate['position']) for x in state['rows']):raise ValueError('Такая позиция этого заказа уже существует')
     r.update(candidate);state['reconciled']=False;state['plan']=None
+
+def transition_row(state, row_id, operation, quantity, actual_date=None):
+    row=next((row for row in state['rows'] if row['id']==row_id),None)
+    if row is None:raise ValueError('Позиция не найдена')
+    ordered,shipped=validate_row(row)
+    remaining=ordered-shipped
+    reserved=row.get('reserved',0)
+    if operation not in ('reserve','ship'):raise ValueError('Неизвестное действие с позицией')
+    quantity=number(quantity,'Количество',allow_zero=operation=='reserve')
+    if quantity>remaining:raise ValueError('Количество превышает неотгруженный остаток')
+    if operation=='reserve':
+        if quantity==reserved:return {'message':'Количество в готовой машине уже сохранено.'}
+        row['reserved']=quantity
+        message='Количество в готовой машине сохранено.' if quantity else 'Товар снова доступен для планирования.'
+    else:
+        try:actual=date.fromisoformat(actual_date)
+        except (TypeError,ValueError):raise ValueError('Укажите фактическую дату отгрузки')
+        if actual.isoformat()>today():raise ValueError('Фактическая дата отгрузки не может быть в будущем')
+        # A confirmed date for the whole balance stays valid for the remaining pieces.
+        lots=limit_lots(row['lots'],remaining-quantity) if position_ready(row) else []
+        readiness_cleared=bool(row['lots']) and not lots and remaining>quantity
+        row.update(shipped=shipped+quantity,reserved=max(0,reserved-quantity),lots=lots)
+        state.setdefault('manualShipments',[]).append({
+            'rowId':row_id,'order':row['order'],'invoice':row.get('invoice',''),'name':row['name'],
+            'qty':quantity,'actualDate':actual.isoformat(),'markedAt':now()
+        })
+        message='Позиция отмечена отгруженной. Остаток уменьшен.' if quantity==remaining else 'Частичная отгрузка сохранена. Остаток уменьшен.'
+        if readiness_cleared:message+=' Для остатка нужна одна подтверждённая дата готовности.'
+    if state['plan']:
+        state['plan']=None
+        message+=' Текущий план сброшен. Соберите машины заново.'
+    return {'message':message}
+
+def limit_lots(lots, quantity):
+    result=[]
+    for lot in lots:
+        if not quantity:break
+        take=min(quantity,lot['qty'])
+        result.append(dict(lot,qty=take))
+        quantity-=take
+    return result
+
+def clear_plan(state, plan_id):
+    plan=state.get('plan')
+    if not plan or plan.get('id')!=plan_id:raise ValueError('План изменился. Обновите страницу.')
+    state['plan']=None
+    return {'message':'План машин сброшен. Товар доступен для новой сборки по текущим остаткам.'}
 
 def make_plan(state):
     if not state['reconciled']:raise ValueError('Подтвердите сверку первоначальных остатков перед сборкой машин.')
@@ -151,7 +201,10 @@ def make_plan(state):
     units=[];mapping={};extra=[];issues=[]
     for r in state['rows']:
         try:
-            q,s=validate_row(r);left=q-s
+            q,s=validate_row(r);reserved=r.get('reserved',0);left=q-s-reserved
+            if reserved:
+                extra.append({'rowId':r['id'],'order':r['order'],'position':r['position'],'invoice':r.get('invoice',''),
+                              'name':r['name'],'qty':reserved,'reason':'В готовой машине, собранной вручную'})
             if left==0:continue
             if not r.get('due'):raise ValueError('Не указан срок «Отгрузить до»')
             if not r.get('order'):raise ValueError('Не указан номер заказа')
@@ -161,12 +214,12 @@ def make_plan(state):
             if ready:
                 unit=r['id'];mapping[unit]=r
                 units.append({'id':unit,'name':r['name'],'order':r['order'],'invoice':r.get('invoice',''),
-                              'qty':left,'shipped':0,'ready':ready,'due':r['due'],'lots':deepcopy(r['lots'])})
+                              'qty':left,'shipped':0,'ready':ready,'due':r['due'],'lots':limit_lots(r['lots'],left)})
             else:extra.append({'rowId':r['id'],'order':r['order'],'position':r['position'],'invoice':r.get('invoice',''),
                  'name':r['name'],'qty':left,'reason':'Нет даты готовности позиции от Донцовой'})
         except ValueError as e:
             issues.append({'rowId':r['id'],'name':r.get('name',''),'reason':str(e)})
-            try:left=max(0,number(r.get('qty'),'Кол.')-number(r.get('shipped',0),'Отгружено'))
+            try:left=max(0,number(r.get('qty'),'Кол.')-number(r.get('shipped',0),'Отгружено')-number(r.get('reserved',0),'В готовой машине'))
             except ValueError:left=0
             if left:extra.append({'rowId':r['id'],'order':r.get('order',''),'position':r.get('position',''),'invoice':r.get('invoice',''),
                                   'name':r.get('name',''),'qty':left,'reason':str(e)})
