@@ -1,5 +1,4 @@
 """Separate, strict Excel channels: initial ledger, new order, readiness response."""
-from collections import defaultdict
 from copy import deepcopy
 from datetime import date, datetime
 from io import BytesIO
@@ -11,8 +10,8 @@ from importer import workbook,parse_date,catalog_import
 from planner import number
 from workflow import canonical_order,clean,key,uid,validate_row,today
 
-ORDER_HEADERS=['№ заказа Комуса','№ позиции заказа','Номер счета','Артикул Комуса','Артикул Промет','Наименование','Заказано, шт.','Отгрузить до','Комментарий']
-REPLY_HEADERS=['ID строки','№ заказа Комуса','№ позиции заказа','Номер счета','Артикул Комуса','Артикул Промет','Наименование','Дата подтвержденная','Дата ответа','Отгружено на дату запроса, шт.']
+ORDER_HEADERS=['№ заказа Комуса','Номер счета','Артикул Комуса','Артикул Промет','Наименование','Заказано, шт.','Отгрузить до','Комментарий']
+REPLY_HEADERS=['ID строки','№ заказа Комуса','Номер счета','Артикул Комуса','Артикул Промет','Наименование','Заказано, шт.','Дата подтвержденная','Дата ответа']
 
 def header(v):return re.sub(r'\s+',' ',clean(v).lower().replace('ё','е').rstrip(':'))
 def text(v):return str(int(v)) if isinstance(v,float) and v.is_integer() else clean(v)
@@ -85,61 +84,68 @@ def parse_initial(raw,sheet,year,mode):
     return {'rows':rows,'errors':errors,'count':len(rows),'warnings':[
         'Сохранится только выбранный актуальный лист. История старых рейсов не импортируется как новые заказы.',
         'Зелёная заливка и плановые колонки не считаются фактом. После загрузки проверьте остатки и подтвердите сверку.',
-        'Если в исходнике нет номеров позиций, назначены постоянные внутренние номера И-...; они попадут в шаблон ответа.']}
+        'Ответы сопоставляются по заказу или счёту и товару. Вводить номера позиций не требуется.']}
 
 def parse_order(raw,sheet,year):
-    result=sheet_records(raw,sheet,ORDER_HEADERS,year)
+    result=sheet_records(raw,sheet,['№ заказа Комуса','Наименование','Заказано, шт.','Отгрузить до'],year)
     if 'sheets' in result:return result
-    rows=[];errors=[];seen=set();orders=set()
+    rows=[];errors=[]
     for line,v in result['records']:
         g=lambda h:v.get(header(h))
         # Ignore a preformatted blank template row.
         if not any(g(x) not in (None,'') for x in ORDER_HEADERS):continue
         try:
-            o=canonical_order(text(g('№ заказа Комуса')));pos=text(g('№ позиции заказа'))
-            r={'id':uid(),'order':o,'position':pos,'invoice':text(g('Номер счета')),'komusSku':text(g('Артикул Комуса')),
+            o=canonical_order(text(g('№ заказа Комуса')));rid=uid()
+            r={'id':rid,'order':o,'position':rid,'internalPosition':True,'invoice':text(g('Номер счета')),'komusSku':text(g('Артикул Комуса')),
                'sku':text(g('Артикул Промет')),'name':text(g('Наименование')),'qty':number(g('Заказано, шт.'),'Заказано',False),
                'shipped':0,'due':strict_date(g('Отгрузить до'),year,'Отгрузить до'),'lots':[],'replyAsOf':'',
                'source':f'{sheet}!{line}','comment':text(g('Комментарий'))}
-            validate_row(r);k=key(o,pos)
-            if k in seen:raise ValueError('Повтор номера позиции в заказе')
-            seen.add(k);orders.add(o);rows.append(r)
+            validate_row(r);rows.append(r)
         except ValueError as e:errors.append({'line':line,'name':text(g('Наименование')),'reason':str(e)})
-    if len(orders)>1:errors.append({'line':'','reason':'В одном шаблоне должен быть один новый заказ Комуса'})
-    return {'rows':rows,'errors':errors,'count':len(rows),'warnings':['Заказ добавится к общему журналу. Готовность по нему появится после отдельного ответа Донцовой.']}
+    return {'rows':rows,'errors':errors,'count':len(rows),'warnings':['Все новые заказы из файла добавятся к общему журналу. Номер позиции не нужен. Готовность обновляется ответом Донцовой.']}
+
+def response_match(r,order,invoice,product,quantity):
+    """Business references identify a row; never guess across orders or products."""
+    if order and canonical_order(r.get('order'))!=order:return False
+    if invoice and header(r.get('invoice'))!=header(invoice):return False
+    if quantity is not None and r['qty']!=quantity:return False
+    matched_article=False
+    for field in ('sku','komusSku'):
+        if product[field] and r.get(field):
+            if header(product[field])!=header(r[field]):return False
+            matched_article=True
+    # Names may differ if an exact article already identifies the product.
+    return matched_article or bool(product['name'] and header(product['name'])==header(r['name']))
 
 def parse_response(raw,sheet,year,state):
-    result=sheet_records(raw,sheet,REPLY_HEADERS,year)
+    result=sheet_records(raw,sheet,['Дата подтвержденная','Дата ответа'],year)
     if 'sheets' in result:return result
     if any(header(h) in result['columns'] for h in ('№ части','Подтверждено, шт.')):
         raise ValueError('Шаблон устарел. Скачайте новый запрос по заказу: нужна одна дата готовности позиции, без количества и частей.')
-    byid={r['id']:r for r in state['rows']};bykey=defaultdict(list)
-    for r in state['rows']:bykey[key(r.get('order'),r.get('position'))].append(r)
+    byid={r['id']:r for r in state['rows']}
     changes=[];errors=[];seen=set()
     for line,v in result['records']:
         g=lambda h:v.get(header(h))
         if all(g(x) in (None,'') for x in ['Дата подтвержденная','Дата ответа']):continue
         try:
-            oid=canonical_order(text(g('№ заказа Комуса')));pos=text(g('№ позиции заказа'));rid=text(g('ID строки'))
-            if not oid or not pos:raise ValueError('Нет номера заказа или позиции')
-            if rid:r=byid.get(rid)
-            else:
-                candidates=bykey[key(oid,pos)];r=candidates[0] if len(candidates)==1 else None
-            if not r:raise ValueError('Нет однозначной позиции исходного заказа')
-            if key(oid,pos)!=key(r['order'],r['position']):raise ValueError('ID относится к другому заказу или позиции')
-            for field,label in [('invoice','Номер счета'),('komusSku','Артикул Комуса'),('sku','Артикул Промет'),('name','Наименование')]:
-                expected=clean(r.get(field));incoming=text(g(label))
-                if expected and incoming!=expected:raise ValueError('Не совпадает '+label)
-            baseline=number(g('Отгружено на дату запроса, шт.'),'Отгружено на дату запроса')
-            if baseline!=r['shipped']:raise ValueError('После формирования запроса была отгрузка. Скачайте новый шаблон ответа по заказу.')
+            oid=canonical_order(text(g('№ заказа Комуса')));invoice=text(g('Номер счета'));rid=text(g('ID строки'))
+            product={field:text(g(label)) for field,label in [('sku','Артикул Промет'),('komusSku','Артикул Комуса'),('name','Наименование')]}
+            if not oid and not invoice:raise ValueError('Укажите номер заказа или номер счёта')
+            if not any(product.values()):raise ValueError('Укажите артикул или наименование товара')
+            quantity=number(g('Заказано, шт.'),'Заказано',False) if g('Заказано, шт.') not in (None,'') else None
+            pool=[byid[rid]] if rid in byid else [] if rid else state['rows']
+            candidates=[r for r in pool if response_match(r,oid,invoice,product,quantity)]
+            if not candidates:raise ValueError('Не найден товар с указанным заказом / счётом, артикулом и количеством. Проверьте реквизиты.')
+            if len(candidates)>1:raise ValueError('Найдено несколько одинаковых строк. Уточните счёт или исходное количество «Заказано, шт.», либо скачайте заполненный запрос из приложения.')
+            r=candidates[0]
             ready=strict_date(g('Дата подтвержденная'),year,'Готовность',False)
             asof=strict_date(g('Дата ответа'),year,'Дата ответа')
             if asof>today():raise ValueError('Дата ответа не может быть в будущем')
             if asof<r.get('replyAsOf',''):raise ValueError('Ответ старее уже сохранённого')
             if r['id'] in seen:raise ValueError('Позиция повторяется: оставьте одну строку с одной датой готовности.')
             seen.add(r['id']);validate_row(r)
-            changes.append({'rowId':r['id'],'order':r['order'],'position':r['position'],'name':r['name'],
-                            'ready':ready,'asOf':asof,'shippedAtRequest':baseline})
+            changes.append({'rowId':r['id'],'order':r['order'],'invoice':r.get('invoice',''),'name':r['name'],
+                            'ready':ready,'asOf':asof,'shippedAtRequest':r['shipped']})
         except ValueError as e:errors.append({'line':line,'name':text(g('Наименование')),'reason':str(e)})
     return {'changes':changes,'errors':errors,'count':len(changes),'warnings':[
         'Одна дата готовности применяется ко всему неотгруженному остатку позиции. Количество берётся из сохранённого заказа.',
@@ -151,22 +157,20 @@ def template_file(kind,rows=None):
     headers=ORDER_HEADERS if kind=='order' else REPLY_HEADERS
     if kind=='order':
         s.append(['ПРОМЕТ. Новый заказ Комуса'])
-        s.append(['Один файл — один новый заказ. Заполните все позиции. Количество — полный объём заказа.'])
+        s.append(['В одном файле можно указать несколько новых заказов. Номер заказа повторите в каждой строке.'])
         s.append(['Даты: ДД.ММ.ГГГГ. Заказы с одинаковым товаром учитываются отдельно.'])
     else:
-        s.append(['','ПРОМЕТ. Подтверждение готовности по заказу'])
+        s.append(['','ПРОМЕТ. Общий запрос Донцовой'])
         s.append(['','Реквизиты заполнит приложение. Донцова указывает одну дату готовности для всей позиции и дату ответа.'])
         s.append(['','Количество берётся из заказа автоматически. Одна позиция — одна строка. Отгрузка только целыми паллетами.'])
     s.append(headers)
     if kind=='response' and rows:
         for r in rows:
             if r['qty']<=r['shipped']:continue
-            s.append([r['id'],r['order'],r['position'],r.get('invoice',''),r.get('komusSku',''),r.get('sku',''),r['name'],None,None,r['shipped']])
+            s.append([r['id'],r['order'],r.get('invoice',''),r.get('komusSku',''),r.get('sku',''),r['name'],r['qty'],None,None])
     while s.max_row<24:s.append([None]*len(headers))
     if kind=='response':
-        for row in range(5,s.max_row+1):
-            if s.cell(row,10).value is None:s.cell(row,10,0)
-        s.column_dimensions['A'].hidden=True;s.column_dimensions['J'].hidden=True
+        s.column_dimensions['A'].hidden=True
     first=1 if kind=='order' else 2;last=len(headers) if kind=='order' else 9
     for row in (1,2,3):s.merge_cells(start_row=row,start_column=first,end_row=row,end_column=last)
     s.freeze_panes='D5';s.auto_filter.ref=f'A4:{s.cell(4,len(headers)).column_letter}{s.max_row}'
@@ -176,8 +180,8 @@ def template_file(kind,rows=None):
             if isinstance(c.value,str) and c.value.startswith(('=','+','-','@')):c.data_type='s'
             if c.row>=5:c.fill=PatternFill('solid',fgColor='FFF6DA' if kind=='order' or 8<=c.column<=9 else 'EFF5FB')
             if kind=='response' and c.row>=5 and c.column in (8,9):c.number_format='dd.mm.yyyy'
-            if kind=='order' and c.row>=5 and c.column==8:c.number_format='dd.mm.yyyy'
-            if c.row>=5 and c.column<=(6 if kind=='order' else 7):c.number_format='@'
+            if kind=='order' and c.row>=5 and c.column==7:c.number_format='dd.mm.yyyy'
+            if c.row>=5 and c.column<=(5 if kind=='order' else 6):c.number_format='@'
     for c in s[4]:c.font=Font(name='Arial',color='FFFFFF',bold=True,size=10);c.fill=PatternFill('solid',fgColor='005BA8')
     s.row_dimensions[4].height=44;s.row_dimensions[1].height=28;s.row_dimensions[2].height=32;s.row_dimensions[3].height=36
     s.cell(1,first).font=Font(name='Arial',size=15,bold=True,color='005BA8')
@@ -185,13 +189,13 @@ def template_file(kind,rows=None):
     if kind=='response':
         guide=w.create_sheet('Как заполнить')
         explanations=[
-            ('Заполнение','Скачайте запрос из выбранного заказа: реквизиты будут заполнены автоматически. Донцова заполняет дату готовности всей позиции и дату ответа.'),
+            ('Один файл на все заказы','Скачайте «Запрос по всем заказам»: приложение заполнит все неотгруженные товары. Донцова заполняет только дату готовности и дату ответа.'),
             ('Дата готовности','Одна дата для всего неотгруженного остатка позиции. Одна позиция заказа — одна строка ответа.'),
-            ('Количество','Приложение берёт количество из заказа за вычетом фактически отправленного. В ответе Донцовой количество вводить не нужно.'),
+            ('Заказано, шт.','Исходный объём заказа заполнит приложение. Он помогает различать одинаковые товары. Это не количество подтверждённой готовности: дату получит только текущий неотгруженный остаток.'),
             ('Разные дни отправки','Заказ на две паллеты может быть отгружен по одной паллете в разные дни. Делить ответ на строки для этого не требуется; машины комплектует программа.'),
             ('Обновление','Новый ответ заменяет прежнюю дату готовности позиции. Если обе даты в строке пустые, позиция не меняется. Чтобы снять дату готовности, оставьте её пустой и укажите дату ответа.'),
-            ('Служебные поля','ID строки и «Отгружено на дату запроса, шт.» заполняет и скрывает приложение. Вручную их вводить или менять не нужно.'),
-            ('Защита от старого ответа','Если после скачивания запроса прошла отгрузка этой позиции, скачайте свежий запрос.'),
+            ('Как определяется товар','Номер заказа или счёта плюс артикул / наименование. Если совпадений несколько, уточните счёт или исходное количество. Номер позиции не нужен. ID строки приложение скрывает и заполняет само; без него ответ также принимается при однозначном совпадении.'),
+            ('Несколько заказов','Ответ по нескольким заказам загружается одним файлом. Товары разных заказов не объединяются. Более ранний ответ не заменяет уже сохранённый.'),
             ('Загрузка','В приложении: «Ответы Донцовой» → «Загрузить ответ Донцовой». Выберите рабочий лист, проверьте и примените.'),
         ]
         guide.append(['Поле / действие','Пояснение'])

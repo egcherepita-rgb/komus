@@ -32,7 +32,7 @@ class ServerTests(unittest.TestCase):
         return c.open(r)
     def test_order_preview_apply_restart_download_and_duplicate(self):
         c=self.client();initial=json.load(self.request(c,'/api/v2/state'));rev=initial['revision']
-        raw=template_file('order');w=load_workbook(BytesIO(raw));s=w.active;s.append(['WEB-1','1','','','','A',260,wf.today(),'']);b=BytesIO();w.save(b);raw=b.getvalue()
+        raw=template_file('order');w=load_workbook(BytesIO(raw));s=w.active;s.append(['WEB-1','','','','A',260,wf.today(),'']);b=BytesIO();w.save(b);raw=b.getvalue()
         p=json.load(self.request(c,'/api/v2/import-preview?kind=order&sheet='+urllib.parse.quote('Новый заказ')+'&filename=new.xlsx',raw,raw=True,revision=rev))
         self.assertFalse(p['errors']);self.assertEqual(len(json.load(self.request(c,'/api/v2/state'))['state']['rows']),0)
         applied=json.load(self.request(c,'/api/v2/import-apply',{'revision':rev,'token':p['token']}));self.assertEqual(len(applied['state']['rows']),1)
@@ -52,6 +52,17 @@ class ServerTests(unittest.TestCase):
         for path in ('/.env','/data/komus.db','/../server.py'):
             with self.assertRaises(urllib.error.HTTPError) as e:self.request(c,path)
             self.assertEqual(e.exception.code,404)
+    def test_bulk_request_contains_all_open_orders_and_only_open_rows(self):
+        c=self.client();state=wf.empty_state()
+        def row(rid,order,shipped=0):
+            return {'id':rid,'order':order,'position':rid,'invoice':'I'+order,'name':'A','sku':'S1','komusSku':'','qty':20,'shipped':shipped,'due':'2026-11-17','lots':[]}
+        state['rows']=[row('r1','O1'),row('r2','O2',10),row('r3','O3',20)]
+        ledger_store.mutate(server.DATA,0,lambda s:s.update(state))
+        w=load_workbook(BytesIO(self.request(c,'/api/v2/templates/response').read()),data_only=True)
+        values=[r for r in w.active.iter_rows(min_row=5,values_only=True) if r[1]]
+        self.assertEqual([(r[1],r[6]) for r in values],[('O1',20),('O2',20)])
+        filtered=load_workbook(BytesIO(self.request(c,'/api/v2/templates/response?order=O2').read()),data_only=True)
+        self.assertEqual(filtered.active['B5'].value,'O2');self.assertIsNone(filtered.active['B6'].value)
     def test_public_demo_and_legacy_overwrite_blocked(self):
         c=self.client(False);d=json.load(self.request(c,'/api/v2/demo'))['state'];self.assertTrue(d['plan']['trucks']);self.assertTrue(all(r['order'].startswith('ДЕМО') for r in d['rows']))
         c=self.client()
@@ -69,7 +80,7 @@ class ServerTests(unittest.TestCase):
             q='/api/v2/import-preview?kind='+kind+'&sheet='+urllib.parse.quote(sheet)+'&filename=test.xlsx'
             preview=json.load(self.request(c,q,raw,raw=True,revision=rev));self.assertFalse(preview['errors'])
             saved=json.load(self.request(c,'/api/v2/import-apply',{'revision':rev,'token':preview['token']}));rev=saved['revision'];return saved
-        w=load_workbook(BytesIO(template_file('order')));w.active.append(['E2E','10','','','','A',440,'2026-11-17','']);b=BytesIO();w.save(b)
+        w=load_workbook(BytesIO(template_file('order')));w.active.append(['E2E','','','','A',440,'2026-11-17','']);b=BytesIO();w.save(b)
         upload(b.getvalue(),'order','Новый заказ')
         w=Workbook();w.active.append(['','','ТУЛА','','','МОСКВА']);w.active.append(['','ВП','Наименование','Кратность']);w.active.append(['1','','A',20]);b=BytesIO();w.save(b)
         upload(b.getvalue(),'catalog',w.active.title)
@@ -86,4 +97,7 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(json.load(self.request(c,'/api/v2/import-preview?kind=response',reply,raw=True))['duplicate'])
         w.active['H5']='2026-11-18';b=BytesIO();w.save(b)
         stale=json.load(self.request(c,'/api/v2/import-preview?kind=response&sheet='+urllib.parse.quote('Ответ Донцовой'),b.getvalue(),raw=True,revision=saved['revision']))
-        self.assertTrue(stale['errors'])
+        self.assertFalse(stale['errors'])
+        updated=json.load(self.request(c,'/api/v2/import-apply',{'revision':saved['revision'],'token':stale['token']}))
+        self.assertEqual(updated['state']['rows'][0]['shipped'],shipped)
+        self.assertEqual(sum(l['qty'] for l in updated['state']['rows'][0]['lots']),440-shipped)

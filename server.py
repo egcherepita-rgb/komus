@@ -110,7 +110,7 @@ class Handler(BaseHTTPRequestHandler):
                 if path=='/api/v2/templates/order':data=template_file('order');filename='komus-new-order.xlsx'
                 elif path=='/api/v2/templates/response':
                     rev,state=ledger_store.read(DATA);order=query.get('order',[''])[0]
-                    rows=[r for r in state['rows'] if r.get('order')==order] if order else []
+                    rows=[r for r in state['rows'] if not order or r.get('order')==order]
                     data=template_file('response',rows);filename='dontsova-response.xlsx'
                 elif path=='/api/v2/export':
                     rev,state=ledger_store.read(DATA)

@@ -18,8 +18,8 @@ def base_row(id='r1',order='O1',qty=260,shipped=0):
 def state():
     s=wf.empty_state();s['rows']=[base_row(),base_row('r2','O2')];s['catalog']=[{'name':'A','type':'single','capacity':10,'vertical':False}];s['reconciled']=True;return s
 
-def response(r,ready=TODAY,asof=TODAY,baseline=None):
-    return [r['id'],r['order'],r['position'],r['invoice'],r['komusSku'],r['sku'],r['name'],ready,asof,r['shipped'] if baseline is None else baseline]
+def response(r,ready=TODAY,asof=TODAY,quantity=None):
+    return [r['id'],r['order'],r['invoice'],r['komusSku'],r['sku'],r['name'],r['qty'] if quantity is None else quantity,ready,asof]
 
 def parsed_reply(s,rows):return parse_response(xlsx(REPLY_HEADERS,rows),'Data',2026,s)
 def meta(kind,seed='1'):return {'sha':hashlib.sha256((kind+seed).encode()).hexdigest(),'filename':'file.xlsx','kind':kind,'at':wf.now()}
@@ -34,11 +34,51 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(sum(l['qty'] for l in s['rows'][0]['lots']),260);self.assertEqual(s['rows'][1]['lots'],[])
         self.assertEqual([r['qty'] for r in s['rows']],[260,260])
     def test_reply_wrong_order_or_article_or_invoice_does_not_match(self):
-        for idx,value in [(1,'O2'),(3,'wrong invoice'),(4,'wrong SKU'),(5,'wrong SKU'),(6,'wrong name')]:
+        for idx,value in [(1,'O2'),(2,'wrong invoice'),(3,'wrong SKU'),(4,'wrong SKU'),(6,999)]:
             s=state();row=response(s['rows'][0]);row[idx]=value
             self.assertTrue(parsed_reply(s,[row])['errors'])
-    def test_reply_matches_order_position_if_id_missing(self):
+    def test_reply_matches_order_product_if_id_missing(self):
         s=state();r=response(s['rows'][1]);r[0]='';p=parsed_reply(s,[r]);self.assertEqual(p['changes'][0]['rowId'],'r2')
+    def test_minimal_reply_matches_invoice_and_name_without_internal_fields(self):
+        s=state();headers=['Номер счета','Наименование','Дата подтвержденная','Дата ответа']
+        p=parse_response(xlsx(headers,[['IO2','A',TODAY,TODAY]]),'Data',2026,s)
+        self.assertFalse(p['errors']);self.assertEqual(p['changes'][0]['rowId'],'r2')
+    def test_quantity_disambiguates_same_product_in_same_order(self):
+        s=state();other=base_row('r3','O1',qty=520);other['position']='20';s['rows'].append(other)
+        row=response(other);row[0]='';row[2]=''
+        p=parsed_reply(s,[row]);self.assertFalse(p['errors']);self.assertEqual(p['changes'][0]['rowId'],'r3')
+        row[6]='';p=parsed_reply(s,[row]);self.assertTrue(p['errors']);self.assertIn('несколько',p['errors'][0]['reason'])
+    def test_invoice_disambiguates_same_product_in_same_order(self):
+        s=state();other=base_row('r3','O1');other.update(position='20',invoice='OTHER');s['rows'].append(other)
+        row=response(other);row[0]='';row[6]='';p=parsed_reply(s,[row])
+        self.assertFalse(p['errors']);self.assertEqual(p['changes'][0]['rowId'],'r3')
+    def test_exact_article_accepts_name_synonym_but_not_conflicting_article(self):
+        s=state();row=response(s['rows'][0]);row[0]='';row[5]='Название Комуса'
+        p=parsed_reply(s,[row]);self.assertFalse(p['errors']);self.assertEqual(p['changes'][0]['rowId'],'r1')
+        row[4]='WRONG';self.assertTrue(parsed_reply(s,[row])['errors'])
+    def test_quantity_alone_cannot_identify_product_or_order(self):
+        s=state();row=response(s['rows'][0]);row[0]='';row[1]='';row[2]=''
+        self.assertTrue(parsed_reply(s,[row])['errors'])
+        row=response(s['rows'][0]);row[0]='';row[3]=row[4]=row[5]=''
+        self.assertTrue(parsed_reply(s,[row])['errors'])
+    def test_identical_rows_require_autofilled_id_and_never_choose_first(self):
+        s=state();other=deepcopy(s['rows'][0]);other.update(id='r3',position='20');s['rows'].append(other)
+        row=response(other);row[0]='';self.assertTrue(parsed_reply(s,[row])['errors'])
+        row[0]='r3';p=parsed_reply(s,[row]);self.assertFalse(p['errors']);self.assertEqual(p['changes'][0]['rowId'],'r3')
+    def test_multiple_orders_upload_in_one_file_without_position_numbers(self):
+        raw=xlsx(ORDER_HEADERS,[['O3','I3','','','A',20,TODAY,''],['O4','I4','','','A',40,TODAY,'']])
+        p=parse_order(raw,'Data',2026);self.assertFalse(p['errors']);s=state();wf.apply_import(s,'order',p,meta('order'))
+        self.assertEqual([r['order'] for r in s['rows']],['O1','O2','O3','O4'])
+        self.assertNotEqual(s['rows'][2]['position'],s['rows'][3]['position'])
+        self.assertNotIn('№ позиции заказа',ORDER_HEADERS)
+    def test_one_reply_file_updates_multiple_orders_without_merging(self):
+        s=state();rows=[response(r) for r in s['rows']]
+        for row in rows:row[0]=''
+        p=parsed_reply(s,rows);self.assertFalse(p['errors']);wf.apply_import(s,'response',p,meta('response'))
+        self.assertEqual([r['lots'][0]['qty'] for r in s['rows']],[260,260])
+    def test_shipment_between_preview_and_apply_blocks_stale_change(self):
+        s=state();p=parsed_reply(s,[response(s['rows'][0])]);s['rows'][0]['shipped']=10
+        with self.assertRaises(ValueError):wf.apply_import(s,'response',p,meta('response'))
     def test_reply_uses_order_remaining_and_replaces_one_date(self):
         s=state();r=s['rows'][0];r['shipped']=60
         p=parsed_reply(s,[response(r)]);self.assertFalse(p['errors']);wf.apply_import(s,'response',p,meta('response'))
@@ -54,20 +94,22 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(s['rows'][0]['shipped'],260);self.assertTrue(wf.apply_import(s,'response',p,m)['duplicate']);self.assertEqual(s['rows'][0]['lots'],[])
     def test_duplicate_position_invalid_date_and_missing_answer_date(self):
         s=state();r=s['rows'][0]
-        for records in [[response(r),response(r)],[response(r,ready='bad')],[response(r,asof='')],[response(r,baseline=1)]]:
+        for records in [[response(r),response(r)],[response(r,ready='bad')],[response(r,asof='')],[response(r,quantity=1)]]:
             self.assertTrue(parsed_reply(s,records)['errors'])
         p=parsed_reply(s,[response(r,ready='',asof='')]);self.assertFalse(p['errors']);self.assertEqual(p['count'],0)
-    def test_stale_template_after_shipment(self):
-        s=state();s['rows'][0]['shipped']=10;p=parsed_reply(s,[response(s['rows'][0],baseline=0)]);self.assertTrue(p['errors'])
+    def test_reply_after_shipment_uses_only_current_remaining(self):
+        s=state();row=response(s['rows'][0]);s['rows'][0]['shipped']=10;p=parsed_reply(s,[row]);self.assertFalse(p['errors'])
+        wf.apply_import(s,'response',p,meta('response'));self.assertEqual(s['rows'][0]['lots'][0]['qty'],250)
+        self.assertEqual(s['rows'][0]['shipped'],10)
     def test_prepopulated_reply_template_no_answer_is_no_update(self):
         s=state();p=parse_response(template_file('response',s['rows']),'Ответ Донцовой',2026,s)
         self.assertEqual(p['count'],0);self.assertFalse(p['errors'])
     def test_reply_template_has_only_dates_and_hidden_automatic_fields(self):
         s=state();w=load_workbook(BytesIO(template_file('response',s['rows'])),data_only=True);sheet=w['Ответ Донцовой']
-        self.assertTrue(sheet.column_dimensions['A'].hidden);self.assertTrue(sheet.column_dimensions['J'].hidden)
-        self.assertEqual(sheet['A5'].value,'r1');self.assertEqual(sheet['J5'].value,0);self.assertIsNone(sheet['H5'].value)
-        for removed in ('№ части','Подтверждено, шт.','Комментарий Донцовой'):self.assertNotIn(removed,[c.value for c in sheet[4]])
-        blank=load_workbook(BytesIO(template_file('response')));self.assertEqual(blank.active['J5'].value,0)
+        self.assertTrue(sheet.column_dimensions['A'].hidden)
+        self.assertEqual(sheet['A5'].value,'r1');self.assertEqual(sheet['G5'].value,260);self.assertIsNone(sheet['H5'].value)
+        for removed in ('№ части','Подтверждено, шт.','Комментарий Донцовой','№ позиции заказа','Отгружено на дату запроса, шт.'):self.assertNotIn(removed,[c.value for c in sheet[4]])
+        blank=load_workbook(BytesIO(template_file('response')));self.assertIsNone(blank.active['G5'].value)
     def test_parsed_response_contains_no_manual_quantity_or_parts(self):
         s=state();p=parsed_reply(s,[response(s['rows'][0])]);self.assertFalse(p['errors'])
         self.assertEqual(p['changes'][0]['ready'],TODAY);self.assertNotIn('lots',p['changes'][0]);self.assertNotIn('qty',p['changes'][0])
@@ -77,7 +119,7 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Шаблон устарел'):parse_response(xlsx(headers,[values]),'Data',2026,s)
         self.assertEqual(s['rows'][0]['lots'],[])
     def test_order_template_append_and_duplicate_order_protection(self):
-        raw=xlsx(ORDER_HEADERS,[['O3','10','I3','K1','S1','A',25,TODAY,'']]);parsed=parse_order(raw,'Data',2026)
+        raw=xlsx(ORDER_HEADERS,[['O3','I3','K1','S1','A',25,TODAY,'']]);parsed=parse_order(raw,'Data',2026)
         s=state();wf.apply_import(s,'order',parsed,meta('order'));self.assertEqual(len(s['rows']),3);self.assertEqual(s['rows'][2]['lots'],[]);self.assertEqual(len(s['catalog']),1)
         self.assertTrue(wf.apply_import(s,'order',parsed,meta('order'))['duplicate'])
         with self.assertRaises(ValueError):wf.apply_import(s,'order',parsed,meta('order','another-file'))
@@ -139,7 +181,7 @@ class WorkflowTests(unittest.TestCase):
         s=wf.upgrade(old);self.assertEqual(s['schema'],2);self.assertEqual(s['rows'][0]['qty'],260);self.assertEqual(s['rows'][0]['lots'][0]['qty'],260);self.assertEqual(len(s['catalog']),1)
     def test_sql_atomicity_conflict_restart_and_raw_file_storage(self):
         with tempfile.TemporaryDirectory() as directory:
-            rev,s=ledger_store.read(directory);raw=xlsx(ORDER_HEADERS,[['O1','10','','','','A',260,TODAY,'']]);p=parse_order(raw,'Data',2026);m=meta('order')
+            rev,s=ledger_store.read(directory);raw=xlsx(ORDER_HEADERS,[['O1','','','','A',260,TODAY,'']]);p=parse_order(raw,'Data',2026);m=meta('order')
             rev,s,_=ledger_store.mutate(directory,rev,lambda s:wf.apply_import(s,'order',p,m),upload=(m,raw))
             self.assertEqual(ledger_store.read(directory)[1]['rows'][0]['order'],'O1');self.assertEqual(ledger_store.source(directory,m['sha'])[1],raw)
             with self.assertRaises(ledger_store.Conflict):ledger_store.mutate(directory,rev-1,lambda s:s.update(rows=[]))
