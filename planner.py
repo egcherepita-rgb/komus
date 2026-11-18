@@ -1,6 +1,5 @@
 """Deterministic pallet placement. No product/order mixing within a pallet."""
 from datetime import date, timedelta
-from math import ceil
 import re
 
 LAYOUTS = [dict(id=i+1, doubles=d, singles=s, length=d*1200+s//2*1000)
@@ -23,6 +22,38 @@ def number(value, label, allow_zero=True):
         return int(n)
     except (ValueError,TypeError,OverflowError): raise ValueError(label+': требуется целое число от '+('0' if allow_zero else '1')+' до 1 000 000')
 
+def pallet_capacity(c):
+    cap=number(c.get('capacity'), 'Кратность отгрузки',False)
+    if c.get('type')=='split':
+        if cap%2:raise ValueError('Красная 1: кратность должна делиться на две одиночные паллеты')
+        cap//=2
+    return cap
+
+def whole_pallets(r,left,cap):
+    """Combine readiness only within this order position; each chunk is one whole pallet."""
+    source_lots=r.get('lots')
+    if source_lots is None:
+        for _ in range(left//cap):yield {'qty':cap,'ready':r['ready']}
+        return
+    sources=[];parts=set()
+    for lot in source_lots:
+        part=str(lot.get('part','')).strip()
+        if not part or part in parts:raise ValueError('Проверьте номера частей готовности')
+        parts.add(part)
+        try:ready=date.fromisoformat(lot['ready']).isoformat()
+        except (KeyError,TypeError,ValueError):raise ValueError('Проверьте даты частей готовности')
+        sources.append({'lotId':part,'qty':number(lot.get('qty'),'Подтверждено',False),'ready':ready})
+    if sum(s['qty'] for s in sources)!=left:raise ValueError('Количество частей не совпадает с подтверждённым остатком')
+    sources.sort(key=lambda s:(s['ready'],s['lotId']));index=0
+    for _ in range(left//cap):
+        needed=cap;allocations=[];ready=''
+        while needed:
+            source=sources[index];take=min(needed,source['qty'])
+            allocations.append({'lotId':source['lotId'],'qty':take});ready=max(ready,source['ready'])
+            needed-=take;source['qty']-=take
+            if not source['qty']:index+=1
+        yield {'qty':cap,'ready':ready,'lotAllocations':allocations}
+
 def build_plan(rows, catalog, start, strategy='urgent', reconciled=False, horizon=120, daily_used=None):
     if not reconciled: raise ValueError('Сначала подтвердите сверку остатков с уже отгруженными рейсами.')
     if strategy not in ('urgent','compact','balanced'): raise ValueError('Неизвестный вариант расчёта')
@@ -30,7 +61,7 @@ def build_plan(rows, catalog, start, strategy='urgent', reconciled=False, horizo
     if len(rows)>5000: raise ValueError('Не более 5000 строк в проекте')
     index={}
     for c in catalog: index.setdefault(normalize(c.get('name')),[]).append(c)
-    pallets=[]; loose=[]; issues=[]; remaining={}; rowmap={}; reasons={}
+    pallets=[]; loose=[]; issues=[]; remaining={}; rowmap={}; reasons={};tails={};capacities={}
     for pos, source in enumerate(rows):
         r=dict(source); rid=str(r.get('id',pos))
         if rid in rowmap: raise ValueError('Повторяется идентификатор строки '+rid)
@@ -50,18 +81,15 @@ def build_plan(rows, catalog, start, strategy='urgent', reconciled=False, horizo
             if c.get('needsReview'): raise ValueError('Подтвердите толкование кратности в справочнике')
             common={'rowId':rid,'name':r['name'],'order':r.get('order',''),'invoice':r.get('invoice',''),
                     'ready':ready.isoformat(),'due':due.isoformat(),'vertical':bool(c.get('vertical'))}
-            if typ=='loose':
-                if not c.get('fixation'): raise ValueError('Для груза без места укажите способ размещения / крепления')
-                loose.append(dict(common,qty=left,type='loose',fixation=c['fixation'])); continue
-            cap=number(c.get('capacity'), 'Кратность',False)
-            if typ=='split':
-                if cap%2: raise ValueError('Красная 1: кратность должна делиться на две одиночные паллеты')
-                cap//=2
-            if len(pallets)+ceil(left/cap)>20000: raise ValueError('Расчёт превышает 20 000 паллет; разделите проект')
-            for n in range(ceil(left/cap)):
-                amount=min(cap,left-n*cap)
-                pallets.append(dict(common,qty=amount,capacity=cap,partial=amount<cap,
-                                    type='double' if typ=='double' else 'single'))
+            if typ=='loose' and not c.get('fixation'):raise ValueError('Для груза без места укажите способ размещения / крепления')
+            cap=pallet_capacity(c)
+            if len(pallets)+len(loose)+left//cap>20000:raise ValueError('Расчёт превышает 20 000 паллет; разделите проект')
+            chunks=list(whole_pallets(r,left,cap));tails[rid]=left%cap;capacities[rid]=cap
+            for chunk in chunks:
+                item=dict(common,**{'capacity':cap,'partial':False,'type':'double' if typ=='double' else 'single'})
+                item.update(chunk)
+                if typ=='loose':item.update(type='loose',fixation=c['fixation']);loose.append(item)
+                else:pallets.append(item)
         except ValueError as e:
             issues.append({'rowId':rid,'name':r.get('name',''),'reason':str(e)})
             reasons[rid]=str(e)
@@ -101,10 +129,17 @@ def build_plan(rows, catalog, start, strategy='urgent', reconciled=False, horizo
     for rid,left in remaining.items():
         if left:
             r=rowmap[rid]
+            tail=tails.get(rid,0)
+            if tail:
+                cap=capacities[rid]
+                leftovers.append(dict(rowId=rid,name=r.get('name',''),qty=tail,order=r.get('order',''),invoice=r.get('invoice',''),
+                    reason=f'Остаток не кратен паллете: {tail} шт. при кратности {cap} шт. Не хватает {cap-tail} шт. до целой паллеты; неполные паллеты не отгружаются.'))
+                left-=tail
+            if not left:continue
             reason=reasons.get(rid)
             if not reason:
                 if r.get('ready','')>(start+timedelta(days=horizon-1)).isoformat(): reason='Готовность за горизонтом расчёта'
                 else: reason='Не хватает совместимых паллет для полной машины по одной из 12 схем; нужен перенос / догруз'
             leftovers.append(dict(rowId=rid,name=r.get('name',''),qty=left,order=r.get('order',''),invoice=r.get('invoice',''),reason=reason))
     return {'trucks':trucks,'leftovers':leftovers,'issues':issues,'strategy':strategy,'start':start.isoformat(),
-            'horizon':horizon,'notice':'План расстановки по габаритам. Вес, высота, устойчивость и крепление проверяются перед отгрузкой. Рабочие дни: пн–пт, без календаря праздников.'}
+            'horizon':horizon,'wholePalletsOnly':True,'notice':'Отгрузка только целыми паллетами. Заказ можно разделять между датами на границах паллет. План расстановки по габаритам: вес, высота, устойчивость и крепление проверяются перед отгрузкой. Рабочие дни: пн–пт, без календаря праздников.'}

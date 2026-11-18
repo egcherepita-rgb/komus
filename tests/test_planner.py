@@ -25,9 +25,9 @@ class PlannerTests(unittest.TestCase):
     def test_red_double_split_quantity(self):
         p=run([row(1,'A',260)],[cat('A','split',20)])
         self.assertEqual(len(p['trucks'][0]['pallets']),26);self.assertEqual(sum(x['qty'] for x in p['trucks'][0]['pallets']),260)
-    def test_partial_pallet_keeps_footprint(self):
+    def test_partial_pallet_is_left_out(self):
         p=run([row(1,'A',251)],[cat('A','single',10)])
-        self.assertEqual(len(p['trucks']),1);self.assertTrue(p['trucks'][0]['pallets'][-1]['partial'])
+        self.assertFalse(p['trucks']);self.assertEqual(sum(x['qty'] for x in p['leftovers']),251);self.assertTrue(any(x['qty']==1 and 'не кратен' in x['reason'] for x in p['leftovers']))
     def test_subtract_shipped(self):
         p=run([row(1,'A',30,shipped=4)],[cat('A')]);self.assertEqual(len(p['trucks']),1)
     def test_second_truck_threshold(self):
@@ -42,13 +42,30 @@ class PlannerTests(unittest.TestCase):
         p=run([row(1,'A',26),row(2,'B',26)],[cat('A','split',3),cat('B',needsReview=True)])
         self.assertEqual(len(p['issues']),2);self.assertFalse(p['trucks'])
     def test_loose_requires_fixation_and_full_truck(self):
-        p=run([row(1,'A',26),row(2,'B',50)],[cat('A'),cat('B','loose',0,fixation='В закреплённом коробе')])
-        self.assertEqual(p['trucks'][0]['loose'][0]['qty'],50)
-        p=run([row(1,'B',50)],[cat('B','loose',0,fixation='Короб')]);self.assertFalse(p['trucks']);self.assertEqual(p['leftovers'][0]['qty'],50)
+        p=run([row(1,'A',26),row(2,'B',50)],[cat('A'),cat('B','loose',10,fixation='В закреплённом коробе')])
+        self.assertEqual(sum(x['qty'] for x in p['trucks'][0]['loose']),50)
+        p=run([row(1,'B',50)],[cat('B','loose',10,fixation='Короб')]);self.assertFalse(p['trucks']);self.assertEqual(p['leftovers'][0]['qty'],50)
     def test_no_mixing_orders_within_pallet(self):
-        p=run([row(i,'A',1) for i in range(26)],[cat('A','single',10)])
+        p=run([row(i,'A',10) for i in range(26)],[cat('A','single',10)])
         self.assertEqual(len(p['trucks'][0]['pallets']),26)
         self.assertEqual(len({x['order'] for x in p['trucks'][0]['pallets']}),26)
+    def test_small_remainders_of_different_orders_do_not_form_a_pallet(self):
+        p=run([row(1,'A',10),row(2,'A',10),row(3,'B',250)],[cat('A','single',20),cat('B','single',10)])
+        self.assertFalse(p['trucks']);self.assertEqual(sum(x['qty'] for x in p['leftovers']),270)
+    def test_remainder_does_not_prevent_other_whole_pallets_from_shipping(self):
+        p=run([row(1,'A',251),row(2,'B',10)],[cat('A','single',10),cat('B','single',10)])
+        self.assertEqual(len(p['trucks']),1);self.assertTrue(all(x['qty']==10 for x in p['trucks'][0]['pallets']))
+        self.assertEqual(p['leftovers'][0]['qty'],1);self.assertIn('не кратен',p['leftovers'][0]['reason'])
+    def test_red_split_uses_whole_single_pallets(self):
+        p=run([row(1,'A',521)],[cat('A','split',40)])
+        self.assertEqual(len(p['trucks']),1);self.assertTrue(all(x['qty']==20 for x in p['trucks'][0]['pallets']))
+        self.assertEqual(p['leftovers'][0]['qty'],1)
+    def test_loose_still_requires_confirmed_shipping_multiple(self):
+        p=run([row(1,'A',26),row(2,'B',11)],[cat('A'),cat('B','loose',5,fixation='Закреплено')])
+        self.assertEqual(sum(x['qty'] for x in p['trucks'][0]['loose']),10)
+        self.assertEqual(p['leftovers'][0]['qty'],1)
+        p=run([row(1,'A',26),row(2,'B',10)],[cat('A'),cat('B','loose',0,fixation='Закреплено')])
+        self.assertFalse(p['trucks'][0]['loose']);self.assertTrue(p['issues'])
     def test_reconciliation_required(self):
         with self.assertRaises(ValueError):build_plan([],[],START)
     def test_negative_fractional_quantities(self):
@@ -65,6 +82,7 @@ class PlannerTests(unittest.TestCase):
                 self.assertEqual(sum(x['type']=='double' for x in t['pallets']),t['layout']['doubles'])
                 self.assertEqual(sum(x['type']=='single' for x in t['pallets']),t['layout']['singles'])
                 for x in t['pallets']:
+                    self.assertEqual(x['qty'],x['capacity']);self.assertFalse(x['partial'])
                     self.assertGreaterEqual(t['date'],x['ready']);sent[x['rowId']]+=x['qty']
                     if x['name']=='B':self.assertTrue(x['vertical'])
             for x in p['leftovers']:sent[x['rowId']]+=x['qty']

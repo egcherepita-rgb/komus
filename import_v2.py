@@ -12,7 +12,7 @@ from planner import number
 from workflow import canonical_order,clean,key,uid,validate_row,today
 
 ORDER_HEADERS=['№ заказа Комуса','№ позиции заказа','Номер счета','Артикул Комуса','Артикул Промет','Наименование','Заказано, шт.','Отгрузить до','Комментарий']
-REPLY_HEADERS=['ID строки','№ заказа Комуса','№ позиции заказа','Номер счета','Артикул Комуса','Артикул Промет','Наименование','№ части','Подтверждено, шт.','Дата подтвержденная','Дата ответа','Комментарий Донцовой','Отгружено на дату запроса, шт.']
+REPLY_HEADERS=['ID строки','№ заказа Комуса','№ позиции заказа','Номер счета','Артикул Комуса','Артикул Промет','Наименование','№ части','Подтверждено, шт.','Дата подтвержденная','Дата ответа','Отгружено на дату запроса, шт.']
 
 def header(v):return re.sub(r'\s+',' ',clean(v).lower().replace('ё','е').rstrip(':'))
 def text(v):return str(int(v)) if isinstance(v,float) and v.is_integer() else clean(v)
@@ -117,7 +117,7 @@ def parse_response(raw,sheet,year,state):
     for line,v in result['records']:
         g=lambda h:v.get(header(h))
         # Populated copied identifiers with no answer are intentionally left untouched.
-        if all(g(x) in (None,'') for x in ['№ части','Подтверждено, шт.','Дата подтвержденная','Дата ответа','Комментарий Донцовой']):continue
+        if all(g(x) in (None,'') for x in ['Подтверждено, шт.','Дата подтвержденная','Дата ответа']):continue
         try:
             oid=canonical_order(text(g('№ заказа Комуса')));pos=text(g('№ позиции заказа'));rid=text(g('ID строки'))
             if not oid or not pos:raise ValueError('Нет номера заказа или позиции')
@@ -131,16 +131,14 @@ def parse_response(raw,sheet,year,state):
                 if expected and incoming!=expected:raise ValueError('Не совпадает '+label)
             baseline=number(g('Отгружено на дату запроса, шт.'),'Отгружено на дату запроса')
             if baseline!=r['shipped']:raise ValueError('После формирования запроса была отгрузка. Скачайте новый шаблон ответа по заказу.')
-            part=text(g('№ части'))
-            if not part:raise ValueError('Укажите номер части готовности')
+            part=text(g('№ части')) or '1'
             qty=number(g('Подтверждено, шт.'),'Подтверждено')
             ready=strict_date(g('Дата подтвержденная'),year,'Готовность',qty>0)
             asof=strict_date(g('Дата ответа'),year,'Дата ответа')
             if asof>today():raise ValueError('Дата ответа не может быть в будущем')
             if asof<r.get('replyAsOf',''):raise ValueError('Ответ старее уже сохранённого')
-            comment=text(g('Комментарий Донцовой'))
-            if qty==0 and (ready or not comment):raise ValueError('При нуле оставьте готовность пустой и укажите причину в комментарии')
-            groups[r['id']].append({'line':line,'part':part,'qty':qty,'ready':ready,'asOf':asof,'comment':comment,'baseline':baseline})
+            if qty==0 and ready:raise ValueError('При нуле оставьте дату готовности пустой')
+            groups[r['id']].append({'line':line,'part':part,'qty':qty,'ready':ready,'asOf':asof,'baseline':baseline})
         except ValueError as e:errors.append({'line':line,'name':text(g('Наименование')),'reason':str(e)})
     changes=[]
     for rid,parts in groups.items():
@@ -151,33 +149,68 @@ def parse_response(raw,sheet,year,state):
         try:validate_row(dict(r,lots=lots))
         except ValueError as e:errors.append({'line':parts[0]['line'],'reason':str(e)});continue
         changes.append({'rowId':rid,'order':r['order'],'position':r['position'],'name':r['name'],'lots':lots,
-             'asOf':parts[0]['asOf'],'shippedAtRequest':parts[0]['baseline'],'comment':' / '.join(p['comment'] for p in parts if p['comment'])})
+             'asOf':parts[0]['asOf'],'shippedAtRequest':parts[0]['baseline']})
     return {'changes':changes,'errors':errors,'count':len(changes),'warnings':[
         'По найденным позициям готовность заменится актуальной разбивкой. Заказанное количество и срок клиента сохранятся.',
-        'Позиции без заполненного ответа не изменятся. Неподтверждённый остаток не включается в машины.']}
+        'Позиции без заполненного ответа не изменятся. Неподтверждённый остаток не включается в машины.',
+        'Количество указывается в штуках товара. В машины попадут только целые паллеты по справочнику кратности.']}
 
 def template_file(kind,rows=None):
     w=Workbook();s=w.active;s.title='Новый заказ' if kind=='order' else 'Ответ Донцовой'
     headers=ORDER_HEADERS if kind=='order' else REPLY_HEADERS
-    s.append(['ПРОМЕТ. Новый заказ Комуса' if kind=='order' else 'ПРОМЕТ. Подтверждение готовности по заказу'])
-    s.append(['Один файл — один новый заказ. Заполните все позиции. Количество — полный объём заказа.' if kind=='order' else 'Реквизиты A:G и отгружено M не менять. Заполните часть, количество, готовность и дату ответа.'])
-    s.append(['Даты: ДД.ММ.ГГГГ. Заказы с одинаковым товаром учитываются отдельно.' if kind=='order' else 'Разные даты готовности — разные части. Новый ответ по позиции полностью заменяет предыдущую разбивку.'])
+    if kind=='order':
+        s.append(['ПРОМЕТ. Новый заказ Комуса'])
+        s.append(['Один файл — один новый заказ. Заполните все позиции. Количество — полный объём заказа.'])
+        s.append(['Даты: ДД.ММ.ГГГГ. Заказы с одинаковым товаром учитываются отдельно.'])
+    else:
+        s.append(['','ПРОМЕТ. Подтверждение готовности по заказу'])
+        s.append(['','Реквизиты заполнит приложение. Донцова заполняет готовое количество товара в штуках и даты.'])
+        s.append(['','Одна дата готовности — часть 1. Для разных дат скопируйте строку целиком и укажите части 1, 2… Отгрузка только целыми паллетами.'])
     s.append(headers)
     if kind=='response' and rows:
         for r in rows:
             if r['qty']<=r['shipped']:continue
-            s.append([r['id'],r['order'],r['position'],r.get('invoice',''),r.get('komusSku',''),r.get('sku',''),r['name'],None,None,None,None,None,r['shipped']])
+            s.append([r['id'],r['order'],r['position'],r.get('invoice',''),r.get('komusSku',''),r.get('sku',''),r['name'],'1',None,None,None,r['shipped']])
     while s.max_row<24:s.append([None]*len(headers))
+    if kind=='response':
+        for row in range(5,s.max_row+1):
+            if s.cell(row,8).value is None:s.cell(row,8,'1')
+            if s.cell(row,12).value is None:s.cell(row,12,0)
+        s.column_dimensions['A'].hidden=True;s.column_dimensions['L'].hidden=True
+    first=1 if kind=='order' else 2;last=len(headers) if kind=='order' else 11
+    for row in (1,2,3):s.merge_cells(start_row=row,start_column=first,end_row=row,end_column=last)
     s.freeze_panes='D5';s.auto_filter.ref=f'A4:{s.cell(4,len(headers)).column_letter}{s.max_row}'
     for row in s:
         for c in row:
             c.font=Font(name='Arial',size=10,color='203146');c.alignment=Alignment(vertical='center',wrap_text=True)
             if isinstance(c.value,str) and c.value.startswith(('=','+','-','@')):c.data_type='s'
-            if c.row>=5:c.fill=PatternFill('solid',fgColor='FFF6DA' if kind=='order' or 8<=c.column<=12 else 'EFF5FB')
+            if c.row>=5:c.fill=PatternFill('solid',fgColor='FFF6DA' if kind=='order' or 8<=c.column<=11 else 'EFF5FB')
             if kind=='response' and c.row>=5 and c.column in (10,11):c.number_format='dd.mm.yyyy'
             if kind=='order' and c.row>=5 and c.column==8:c.number_format='dd.mm.yyyy'
             if c.row>=5 and c.column<=(6 if kind=='order' else 7):c.number_format='@'
     for c in s[4]:c.font=Font(name='Arial',color='FFFFFF',bold=True,size=10);c.fill=PatternFill('solid',fgColor='005BA8')
-    s.row_dimensions[4].height=40;s.row_dimensions[1].height=28;s['A1'].font=Font(name='Arial',size=15,bold=True,color='005BA8')
+    s.row_dimensions[4].height=44;s.row_dimensions[1].height=28;s.row_dimensions[2].height=32;s.row_dimensions[3].height=36
+    s.cell(1,first).font=Font(name='Arial',size=15,bold=True,color='005BA8')
     for i,h in enumerate(headers,1):s.column_dimensions[s.cell(4,i).column_letter].width=40 if 'Наименование' in h or 'Комментарий' in h else 25 if 'ID' in h else 21
+    if kind=='response':
+        guide=w.create_sheet('Как заполнить')
+        explanations=[
+            ('Заполнение','Скачайте запрос из выбранного заказа в приложении: реквизиты будут заполнены автоматически. Жёлтые поля — ответ Донцовой.'),
+            ('Подтверждено, шт.','Количество готового ещё неотгруженного товара в штуках, а не число паллет. Пример: на паллете 20 шт., две готовые паллеты — введите 40.'),
+            ('№ части','Разбивка одной позиции по датам готовности. Если всё готово в одну дату, оставьте 1. Если 20 шт. готовы 19 ноября, ещё 20 — 20 ноября, скопируйте строку целиком и укажите части 1 и 2.'),
+            ('Отгрузка по дням','Если обе паллеты готовы одновременно, достаточно одной строки с общим количеством. Программа может распределить целые паллеты этого заказа по разным машинам и датам.'),
+            ('Целые паллеты','Отгрузка только кратно паллете из справочника. Остаток, которого не хватает до целой паллеты, останется с объяснением причины. Части готовности одной позиции могут объединяться после готовности всех нужных штук.'),
+            ('Даты','«Дата подтвержденная» — когда товар готов на заводе. «Дата ответа» — когда подтверждена эта информация; одна дата ответа для всех частей позиции.'),
+            ('Обновление','По включённой позиции укажите всю актуальную разбивку неотгруженного остатка. Она заменит предыдущую готовность. Пустое количество — нет ответа; 0 — готовности нет, дату готовности оставьте пустой.'),
+            ('Служебные поля','ID строки и «Отгружено на дату запроса, шт.» заполняет приложение. Они скрыты, вручную их вводить или менять не нужно.'),
+            ('Защита от старого ответа','Если после скачивания запроса была отгрузка этой позиции, скачайте свежий запрос: прежний будет отклонён, чтобы не вернуть отправленный товар в остатки.'),
+            ('Загрузка','В приложении: «Ответы Донцовой» → «Загрузить ответ Донцовой». Выберите рабочий лист, проверьте и примените.'),
+        ]
+        guide.append(['Поле / действие','Пояснение'])
+        for title,description in explanations:guide.append([title,description])
+        guide.column_dimensions['A'].width=28;guide.column_dimensions['B'].width=100
+        for row in guide:
+            guide.row_dimensions[row[0].row].height=58
+            for c in row:c.font=Font(name='Arial',size=11,color='203146');c.alignment=Alignment(wrap_text=True,vertical='center')
+        for c in guide[1]:c.fill=PatternFill('solid',fgColor='005BA8');c.font=Font(name='Arial',size=11,bold=True,color='FFFFFF')
     b=BytesIO();w.save(b);return b.getvalue()

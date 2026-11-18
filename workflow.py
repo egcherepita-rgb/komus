@@ -4,7 +4,7 @@ from copy import deepcopy
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 import hashlib, json, uuid
-from planner import build_plan, number, normalize, workdays
+from planner import build_plan, number, normalize, workdays, pallet_capacity
 
 
 def today(): return datetime.now(ZoneInfo('Europe/Moscow')).date().isoformat()
@@ -139,10 +139,10 @@ def make_plan(state):
             if not r.get('due'):raise ValueError('Не указан срок «Отгрузить до»')
             if not r.get('order'):raise ValueError('Не указан номер заказа')
             confirmed=sum(l['qty'] for l in r['lots'])
-            for lot in r['lots']:
-                unit=uid();mapping[unit]=(r,lot)
+            if confirmed:
+                unit=r['id'];mapping[unit]=r
                 units.append({'id':unit,'name':r['name'],'order':r['order'],'invoice':r.get('invoice',''),
-                              'qty':lot['qty'],'shipped':0,'ready':lot['ready'],'due':r['due']})
+                              'qty':confirmed,'shipped':0,'ready':min(l['ready'] for l in r['lots']),'due':r['due'],'lots':deepcopy(r['lots'])})
             if left>confirmed:extra.append({'rowId':r['id'],'order':r['order'],'position':r['position'],'invoice':r.get('invoice',''),
                  'name':r['name'],'qty':left-confirmed,'reason':'Нет подтверждённой готовности от Донцовой на это количество'})
         except ValueError as e:
@@ -157,11 +157,12 @@ def make_plan(state):
     p=build_plan(units,state['catalog'],start,state['settings']['strategy'],True,daily_used=used)
     for t in p['trucks']:
         for item in t['pallets']+t['loose']:
-            r,lot=mapping[item['rowId']];item.update(rowId=r['id'],lotId=lot['part'],position=r['position'],sku=r.get('sku',''),komusSku=r.get('komusSku',''))
+            r=mapping[item['rowId']];parts=[a['lotId'] for a in item['lotAllocations']]
+            item.update(rowId=r['id'],lotId=', '.join(parts),position=r['position'],sku=r.get('sku',''),komusSku=r.get('komusSku',''))
     for item in p['leftovers']:
-        r,lot=mapping[item['rowId']];item.update(rowId=r['id'],lotId=lot['part'],position=r['position'])
+        r=mapping[item['rowId']];item.update(rowId=r['id'],position=r['position'])
     for item in p['issues']:
-        r,lot=mapping[item['rowId']];item['rowId']=r['id']
+        r=mapping[item['rowId']];item['rowId']=r['id']
     p['leftovers'].extend(extra);p['issues'].extend(issues);p['id']=uid();p['createdAt']=now()
     state['plan']=p;return p
 
@@ -172,6 +173,7 @@ def dispatch(state,plan_id,truck_id,actual_date):
     if not p or p['id']!=plan_id:raise ValueError('План изменился. Обновите страницу.')
     t=next((x for x in p['trucks'] if x['id']==truck_id),None)
     if not t:raise ValueError('Машина не найдена в текущем плане')
+    if not p.get('wholePalletsOnly'):raise ValueError('Пересоберите машины: этот план создан до включения правила целых паллет.')
     try:actual=date.fromisoformat(actual_date)
     except (TypeError,ValueError):raise ValueError('Укажите фактическую дату отгрузки')
     if actual.isoformat()>today():raise ValueError('Нельзя отметить будущую дату фактической отгрузки')
@@ -180,11 +182,19 @@ def dispatch(state,plan_id,truck_id,actual_date):
     if day_count>=2:raise ValueError('На эту дату уже учтены две машины')
     if day_count==1 and not any(workdays(date.fromisoformat(x['due']),actual)>3 for x in t['pallets']):raise ValueError('Вторая машина допускается только при просрочке более 3 рабочих дней')
     allocations=defaultdict(int)
-    for item in t['pallets']+t['loose']:allocations[(item['rowId'],item['lotId'])]+=item['qty']
     index={r['id']:r for r in state['rows']}
+    for item in t['pallets']+t['loose']:
+        r=index[item['rowId']];matches=[c for c in state['catalog'] if normalize(c.get('name'))==normalize(r['name'])]
+        if len(matches)!=1:raise ValueError('Проверьте кратность позиции и пересоберите машины.')
+        cap=pallet_capacity(matches[0])
+        if item.get('partial') or item.get('capacity')!=cap or item['qty']!=cap:raise ValueError('Отгрузка допускается только целыми паллетами. Пересоберите машины.')
+        sources=item.get('lotAllocations',[])
+        if not sources or sum(number(a.get('qty'),'Количество части',False) for a in sources)!=item['qty']:raise ValueError('Не совпадает состав готовности паллеты. Пересоберите машины.')
+        for source in sources:allocations[(item['rowId'],source['lotId'])]+=source['qty']
     for (rid,lid),qty in allocations.items():
         r=index[rid];lot=next((l for l in r['lots'] if l['part']==lid),None)
         if not lot or lot['qty']<qty:raise ValueError('Остаток подтверждения изменился. Пересоберите машины.')
+        if lot['ready']>actual_date:raise ValueError('Нельзя отгрузить раньше готовности всех частей паллеты')
     for (rid,lid),qty in allocations.items():
         r=index[rid];lot=next(l for l in r['lots'] if l['part']==lid)
         lot['qty']-=qty;r['shipped']+=qty;r['lots']=[l for l in r['lots'] if l['qty']>0]

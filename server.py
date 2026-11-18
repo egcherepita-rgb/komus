@@ -114,7 +114,7 @@ class Handler(BaseHTTPRequestHandler):
                     data=template_file('response',rows);filename='dontsova-response.xlsx'
                 elif path=='/api/v2/export':
                     rev,state=ledger_store.read(DATA)
-                    if not state.get('plan'):raise ValueError('Сначала соберите машины')
+                    if not state.get('plan') or not state['plan'].get('wholePalletsOnly'):raise ValueError('Сначала пересоберите машины: отгрузка разрешена только целыми паллетами')
                     data=export_plan(state['plan']);filename='komus-machines.xlsx'
                 elif path=='/api/v2/source':
                     found=ledger_store.source(DATA,query.get('sha',[''])[0])
@@ -181,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
                     if i>=len(s['catalog']):raise ValueError('Строка справочника не найдена')
                     if not item.get('name') or item.get('type') not in ('single','double','split','loose'):raise ValueError('Проверьте товар и тип паллеты')
                     item['capacity']=number(item.get('capacity',0),'Кратность')
-                    if item['type']!='loose' and not item.get('needsReview') and not item['capacity']:raise ValueError('Укажите кратность')
+                    if not item.get('needsReview') and not item['capacity']:raise ValueError('Укажите кратность отгрузки, в том числе для груза без отдельного места')
                     if item['type']=='split' and not item.get('needsReview') and item['capacity']%2:raise ValueError('Числовая кратность красной 1 должна делиться на 2')
                     s['catalog'][i]=item;s['catalogUpdated']=now();s['plan']=None
                 rev,state,result=ledger_store.mutate(DATA,expected,catalog_row)

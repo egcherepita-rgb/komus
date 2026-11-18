@@ -57,6 +57,11 @@ class ServerTests(unittest.TestCase):
         c=self.client()
         with self.assertRaises(urllib.error.HTTPError) as e:self.request(c,'/api/project',{'project':{'rows':[]},'revision':0})
         self.assertEqual(e.exception.code,410)
+    def test_old_cached_plan_cannot_be_exported(self):
+        c=self.client();old=server.demo();old['plan'].pop('wholePalletsOnly',None)
+        ledger_store.mutate(server.DATA,0,lambda s:s.update(old))
+        with self.assertRaises(urllib.error.HTTPError) as e:self.request(c,'/api/v2/export')
+        self.assertEqual(e.exception.code,400)
     def test_readiness_build_dispatch_and_persistent_remaining_via_http(self):
         c=self.client();rev=0
         def upload(raw,kind,sheet):

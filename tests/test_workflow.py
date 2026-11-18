@@ -19,7 +19,7 @@ def state():
     s=wf.empty_state();s['rows']=[base_row(),base_row('r2','O2')];s['catalog']=[{'name':'A','type':'single','capacity':10,'vertical':False}];s['reconciled']=True;return s
 
 def response(r,qty=260,part='1',ready=TODAY,asof=TODAY,baseline=None):
-    return [r['id'],r['order'],r['position'],r['invoice'],r['komusSku'],r['sku'],r['name'],part,qty,ready,asof,'Нет готовности' if qty==0 else '',r['shipped'] if baseline is None else baseline]
+    return [r['id'],r['order'],r['position'],r['invoice'],r['komusSku'],r['sku'],r['name'],part,qty,ready,asof,r['shipped'] if baseline is None else baseline]
 def parsed_reply(s,rows):return parse_response(xlsx(REPLY_HEADERS,rows),'Data',2026,s)
 def meta(kind,seed='1'):return {'sha':hashlib.sha256((kind+seed).encode()).hexdigest(),'filename':'file.xlsx','kind':kind,'at':wf.now()}
 
@@ -60,6 +60,20 @@ class WorkflowTests(unittest.TestCase):
     def test_prepopulated_reply_template_no_answer_is_no_update(self):
         s=state();p=parse_response(template_file('response',s['rows']),'Ответ Донцовой',2026,s)
         self.assertEqual(p['count'],0);self.assertFalse(p['errors'])
+    def test_reply_template_hides_auto_fields_and_has_no_comment_column(self):
+        s=state();w=load_workbook(BytesIO(template_file('response',s['rows'])),data_only=True);sheet=w['Ответ Донцовой']
+        self.assertTrue(sheet.column_dimensions['A'].hidden);self.assertTrue(sheet.column_dimensions['L'].hidden)
+        self.assertEqual(sheet['A5'].value,'r1');self.assertEqual(sheet['L5'].value,0);self.assertEqual(sheet['H5'].value,'1')
+        self.assertNotIn('Комментарий Донцовой',[c.value for c in sheet[4]])
+        blank=load_workbook(BytesIO(template_file('response')));self.assertEqual(blank.active['L5'].value,0)
+    def test_reply_zero_or_default_part_needs_no_comment(self):
+        s=state();r=response(s['rows'][0],0,ready='');r[7]='';p=parsed_reply(s,[r])
+        self.assertFalse(p['errors']);self.assertEqual(p['changes'][0]['lots'],[])
+        r=response(s['rows'][0],20);r[7]='';p=parsed_reply(s,[r]);self.assertFalse(p['errors']);self.assertEqual(p['changes'][0]['lots'][0]['part'],'1')
+    def test_older_reply_template_with_comment_is_still_accepted(self):
+        s=state();r=response(s['rows'][0],20);r.insert(11,'Legacy note')
+        headers=REPLY_HEADERS[:11]+['Комментарий Донцовой']+REPLY_HEADERS[11:]
+        p=parse_response(xlsx(headers,[r]),'Data',2026,s);self.assertFalse(p['errors']);self.assertEqual(p['changes'][0]['lots'][0]['qty'],20)
     def test_order_template_append_and_duplicate_order_protection(self):
         raw=xlsx(ORDER_HEADERS,[['O3','10','I3','K1','S1','A',25,TODAY,'']]);parsed=parse_order(raw,'Data',2026)
         s=state();wf.apply_import(s,'order',parsed,meta('order'));self.assertEqual(len(s['rows']),3);self.assertEqual(s['rows'][2]['lots'],[]);self.assertEqual(len(s['catalog']),1)
@@ -86,6 +100,35 @@ class WorkflowTests(unittest.TestCase):
         s=state();r=s['rows'][0];r['lots']=[{'part':'1','qty':260,'ready':TODAY}];wf.make_plan(s)
         with self.assertRaises(ValueError):wf.dispatch(s,s['plan']['id'],1,(date.fromisoformat(TODAY)+timedelta(days=100)).isoformat())
         with self.assertRaises(ValueError):wf.dispatch(s,s['plan']['id'],1,(date.fromisoformat(TODAY)-timedelta(days=1)).isoformat())
+    def test_two_whole_pallets_of_one_order_can_ship_on_different_days(self):
+        s=state();a=base_row(qty=40);b=base_row('r2','O2',qty=500);b['name']='B'
+        tomorrow=(date.fromisoformat(TODAY)+timedelta(days=1)).isoformat()
+        a['lots']=[{'part':'1','qty':20,'ready':TODAY},{'part':'2','qty':20,'ready':tomorrow}];b['lots']=[{'part':'1','qty':500,'ready':TODAY}]
+        s['rows']=[a,b];s['catalog']=[{'name':'A','type':'single','capacity':20},{'name':'B','type':'single','capacity':10}];wf.make_plan(s)
+        self.assertEqual([t['date'] for t in s['plan']['trucks']],[TODAY,tomorrow])
+        for t in s['plan']['trucks']:self.assertEqual(sum(p['qty'] for p in t['pallets'] if p['rowId']=='r1'),20)
+        t=s['plan']['trucks'][0];wf.dispatch(s,s['plan']['id'],t['id'],TODAY);self.assertEqual(a['shipped'],20)
+        with patch('workflow.today',return_value=tomorrow):
+            t=s['plan']['trucks'][0];wf.dispatch(s,s['plan']['id'],t['id'],tomorrow)
+        self.assertEqual(a['shipped'],40);self.assertEqual(a['lots'],[]);self.assertEqual(len(s['shipments']),2)
+    def test_readiness_fragments_combine_only_after_all_pieces_are_ready(self):
+        s=state();a=base_row(qty=20);b=base_row('r2','O2',qty=250);b['name']='B'
+        tomorrow=(date.fromisoformat(TODAY)+timedelta(days=1)).isoformat()
+        a['lots']=[{'part':'1','qty':7,'ready':TODAY},{'part':'2','qty':13,'ready':tomorrow}];b['lots']=[{'part':'1','qty':250,'ready':TODAY}]
+        s['rows']=[a,b];s['catalog']=[{'name':'A','type':'single','capacity':20},{'name':'B','type':'single','capacity':10}];wf.make_plan(s)
+        t=s['plan']['trucks'][0];self.assertEqual(t['date'],tomorrow)
+        pallet=next(p for p in t['pallets'] if p['rowId']=='r1');self.assertEqual(pallet['qty'],20)
+        self.assertEqual(pallet['lotAllocations'],[{'lotId':'1','qty':7},{'lotId':'2','qty':13}])
+        with patch('workflow.today',return_value=tomorrow):wf.dispatch(s,s['plan']['id'],t['id'],tomorrow)
+        self.assertEqual(a['shipped'],20);self.assertEqual(a['lots'],[])
+    def test_old_or_partial_cached_plan_cannot_be_dispatched(self):
+        s=state();s['rows'][0]['lots']=[{'part':'1','qty':260,'ready':TODAY}];wf.make_plan(s)
+        s['plan']['wholePalletsOnly']=False;before=deepcopy(s)
+        with self.assertRaisesRegex(ValueError,'Пересоберите'):wf.dispatch(s,s['plan']['id'],1,TODAY)
+        self.assertEqual(s,before)
+        s['plan']['wholePalletsOnly']=True;s['plan']['trucks'][0]['pallets'][0]['qty']=1;before=deepcopy(s)
+        with self.assertRaisesRegex(ValueError,'целыми паллетами'):wf.dispatch(s,s['plan']['id'],1,TODAY)
+        self.assertEqual(s,before)
     def test_legacy_migration_preserves_quantities_dates_and_catalog(self):
         old={'rows':[dict(base_row(),ready=TODAY)],'catalog':state()['catalog'],'reconciled':True,'start':TODAY,'strategy':'urgent'}
         s=wf.upgrade(old);self.assertEqual(s['schema'],2);self.assertEqual(s['rows'][0]['qty'],260);self.assertEqual(s['rows'][0]['lots'][0]['qty'],260);self.assertEqual(len(s['catalog']),1)

@@ -42,8 +42,8 @@ def catalog_import(raw):
         if marker not in ('0','0.5','1'):continue
         name=str(row[2].value).strip(); amount=str(row[3].value or '').strip()
         typ='loose' if marker=='0' else 'single' if marker=='0.5' else 'split' if red(row[0]) else 'double'
-        try:cap=int(amount); review=cap<=0 and typ!='loose'
-        except ValueError:cap=0;review=typ!='loose'
+        try:cap=int(amount); review=cap<=0
+        except ValueError:cap=0;review=True
         result.append(dict(name=name,type=typ,capacity=cap,vertical=str(row[1].value or '').strip().upper()=='ВП',
                            original=amount,needsReview=review,fixation='',source=f'{s.title}!C{row[2].row}:D{row[2].row}'))
     if not result:raise ValueError('Не найден справочник Тула: ожидаются маркер A, ВП B, наименование C, кратность D')
