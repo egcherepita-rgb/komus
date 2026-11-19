@@ -45,7 +45,21 @@ if ! "$KOMUS_RECOVER"; then
     docker compose -p promet-komus build app
 fi
 docker compose -p promet-komus up -d --no-deps app
-KOMUS_HTTP_ADDRESS="$(docker compose -p promet-komus port app 8080)"
-curl -fsS --retry 12 --retry-delay 2 --retry-connrefused "http://$KOMUS_HTTP_ADDRESS/health"
-printf '\nОбновление проверено. Резервная копия: %s\n' "$KOMUS_BACKUP_NAME"
-docker compose -p promet-komus ps
+KOMUS_HEALTH_ERROR=''
+for (( attempt=1; attempt<=15; attempt++ )); do
+    if KOMUS_HTTP_ADDRESS="$(docker compose -p promet-komus port app 8080 2>&1)"; then
+        if KOMUS_HEALTH_RESULT="$(curl -fsS --max-time 2 "http://$KOMUS_HTTP_ADDRESS/health" 2>&1)"; then
+            printf '%s\nОбновление проверено. Резервная копия: %s\n' "$KOMUS_HEALTH_RESULT" "$KOMUS_BACKUP_NAME"
+            docker compose -p promet-komus ps
+            exit 0
+        fi
+        KOMUS_HEALTH_ERROR="$KOMUS_HEALTH_RESULT"
+    else
+        KOMUS_HEALTH_ERROR="$KOMUS_HTTP_ADDRESS"
+    fi
+    if (( attempt < 15 )); then sleep 2; fi
+done
+printf 'Приложение не ответило после запуска. Последняя ошибка: %s\nРезервная копия: %s\n' "$KOMUS_HEALTH_ERROR" "$KOMUS_BACKUP_NAME" >&2
+docker compose -p promet-komus ps -a app >&2 || true
+docker compose -p promet-komus logs --no-color --tail=25 app >&2 || true
+exit 1
