@@ -73,6 +73,35 @@ class ServerTests(unittest.TestCase):
         ledger_store.mutate(server.DATA,0,lambda s:s.update(old))
         with self.assertRaises(urllib.error.HTTPError) as e:self.request(c,'/api/v2/export')
         self.assertEqual(e.exception.code,400)
+    def test_build_updates_saved_two_pallet_entries_and_splits_order_between_days(self):
+        client=self.client()
+        initial=wf.empty_state()
+        initial['reconciled']=True
+        rack='Стеллаж Cobalt Shelf MS 180KD/100x50/4'
+        cabinet='Шкаф для сумок усиленный Комус Мебель ML-24-60'
+        initial['catalog']=[
+            {'name':rack,'type':'split','original':'25*2п','needsReview':True,'capacity':0},
+            {'name':cabinet,'type':'split','original':'20*2п','needsReview':True,'capacity':0},
+            {'name':'Другой товар','type':'single','original':'1','capacity':1},
+        ]
+        def ready_row(rid,name,qty,ready,due):
+            return {'id':rid,'order':rid,'position':'1','name':name,'qty':qty,
+                    'shipped':0,'due':due,'lots':[{'part':'1','qty':qty,'ready':ready}]}
+        first,second='2026-11-17','2026-11-18'
+        initial['rows']=[
+            ready_row('rack',rack,50,first,second),
+            ready_row('fill1','Другой товар',25,first,first),
+            ready_row('fill2','Другой товар',25,second,first),
+        ]
+        rev,_,_=ledger_store.mutate(server.DATA,0,lambda s:s.update(initial))
+        result=json.load(self.request(client,'/api/v2/build',{'revision':rev,'start':first}))
+        state=result['state']
+        self.assertEqual(state['catalog'][0]['capacity'],50)
+        self.assertEqual((state['catalog'][1]['original'],state['catalog'][1]['capacity']),('18*2п',36))
+        trucks=state['plan']['trucks']
+        self.assertEqual([t['date'] for t in trucks],[first,second])
+        for truck in trucks:
+            self.assertEqual([(p['type'],p['qty']) for p in truck['pallets'] if p['rowId']=='rack'],[('single',25)])
     def test_build_recovers_previously_skipped_limiters_and_exports_without_places(self):
         client=self.client()
         initial=server.demo()

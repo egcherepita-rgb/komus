@@ -12,7 +12,7 @@ class ImportTests(unittest.TestCase):
         w=Workbook();s=w.active;s.append(['','','ТУЛА','','','МОСКВА']);s.append(['','ВП','Наименование','Кратность']);
         for r in [('0.5.','','A',12),('1','ВП','B','22*2п'),('1','','C',30)]:s.append(r)
         s['A3'].font=Font(color='FFFF0000');s['A4'].font=Font(color='FFFF0000')
-        c=catalog_import(bytes_for(w))['catalog'];self.assertEqual([x['type'] for x in c],['single','split','double']);self.assertTrue(c[1]['needsReview']);self.assertTrue(c[1]['vertical'])
+        c=catalog_import(bytes_for(w))['catalog'];self.assertEqual([x['type'] for x in c],['single','split','double']);self.assertFalse(c[1]['needsReview']);self.assertEqual(c[1]['capacity'],44);self.assertTrue(c[1]['vertical'])
     def test_rows_only_selected_sheet_no_planned_deduction(self):
         w=Workbook();s=w.active;s.title='отгрузка с УЗМК';s.append(['Комментарий']);s.append(['№ заказа:','Номер счета','Наименование','Кол.','Отгрузить до:','Дата подтвержденная:','Отгрузка 16.11.']);s.append(['O1','I1','A',26,'18.11.','16.11.',13]);s.append([None,None,'B',5,None,None,None]);w.create_sheet('отгруженные целиком')
         raw=bytes_for(w);self.assertEqual(len(rows_import(raw)['sheets']),2)

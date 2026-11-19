@@ -4,7 +4,7 @@ from copy import deepcopy
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 import hashlib, json, uuid
-from planner import build_plan, number, resolve_catalog_product, workdays, pallet_capacity
+from planner import apply_two_pallet_notation, build_plan, number, resolve_catalog_product, workdays, pallet_capacity
 
 
 def today(): return datetime.now(ZoneInfo('Europe/Moscow')).date().isoformat()
@@ -205,6 +205,8 @@ def clear_plan(state, plan_id):
 def make_plan(state):
     if not state['reconciled']:raise ValueError('Подтвердите сверку первоначальных остатков перед сборкой машин.')
     if not state['catalog']:raise ValueError('Сначала загрузите справочник кратности Тула.')
+    for item in state['catalog']:
+        apply_two_pallet_notation(item)
     units=[];mapping={};extra=[];issues=[]
     for r in state['rows']:
         try:
@@ -266,7 +268,9 @@ def dispatch(state,plan_id,truck_id,actual_date):
     for item in t['pallets']+t['loose']:
         r=index[item['rowId']]
         if not position_ready(r):raise ValueError('Нет одной даты готовности на весь остаток позиции. Обновите ответ Донцовой.')
-        cap=pallet_capacity(resolve_catalog_product(r,state['catalog']))
+        catalog_item=dict(resolve_catalog_product(r,state['catalog']))
+        apply_two_pallet_notation(catalog_item)
+        cap=pallet_capacity(catalog_item)
         if item.get('partial') or item.get('capacity')!=cap or item['qty']!=cap:raise ValueError('Отгрузка допускается только целыми паллетами. Пересоберите машины.')
         sources=item.get('lotAllocations',[])
         if not sources or sum(number(a.get('qty'),'Количество части',False) for a in sources)!=item['qty']:raise ValueError('Не совпадает состав готовности паллеты. Пересоберите машины.')

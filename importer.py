@@ -5,7 +5,7 @@ import re, zipfile
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.styles.colors import COLOR_INDEX
-from planner import LIMITER_PLACEMENT, article_key, pallet_limiter_model
+from planner import LIMITER_PLACEMENT, apply_two_pallet_notation, article_key, pallet_limiter_model
 
 def workbook(raw):
     if len(raw)>15*1024*1024: raise ValueError('Файл больше 15 МБ')
@@ -63,9 +63,10 @@ def catalog_import(raw):
         for field,column in article_columns.items():
             article=article_key(row[column].value)
             if article:item[field]=article
+        apply_two_pallet_notation(item)
         result.append(item)
     if not result:raise ValueError('Не найден справочник Тула: ожидаются маркер A, ВП B, наименование C, кратность D')
-    return {'catalog':result,'warnings':['Сложные кратности требуют ручного подтверждения. Для красной 1 введите количество на сдвоенный паллет; программа разделит его пополам.']}
+    return {'catalog':result,'warnings':['Для красной 1 запись N*2п означает N шт. на одной паллете 0,5. Две паллеты — минимум при заказе; по машинам они распределяются отдельно. Остальные сложные записи требуют проверки.']}
 
 def rows_import(raw,sheet=None,year=None):
     w=workbook(raw)

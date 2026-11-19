@@ -221,6 +221,22 @@ def pallet_capacity(c):
         cap//=2
     return cap
 
+def apply_two_pallet_notation(item):
+    """A red 1 entry N*2п gives N pieces per single pallet and a two-pallet order minimum."""
+    if item.get('type') != 'split':
+        return
+    match = re.fullmatch(r'\s*([1-9]\d{0,5})\s*[*×xх]\s*2\s*п\.?\s*',
+                         item.get('original') or '', flags=re.I)
+    if not match:
+        return
+    pieces = int(match[1])
+    # Correct the obsolete value in both the saved catalogue and old Excel uploads.
+    model = tula_model(item.get('name') or '')
+    if pieces == 20 and model and model[:2] == ('ШКАФ','ML2460'):
+        item.update(original='18*2п',capacity=36,needsReview=False)
+    elif item.get('needsReview') and pieces <= 500000:
+        item.update(capacity=pieces*2,needsReview=False)
+
 def whole_pallets(r,left,cap):
     """Combine readiness only within this order position; each chunk is one whole pallet."""
     source_lots=r.get('lots')
