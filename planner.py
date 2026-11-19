@@ -1,5 +1,6 @@
 """Deterministic pallet placement. No product/order mixing within a pallet."""
 from datetime import date, timedelta
+from functools import lru_cache
 import re
 
 LAYOUTS = [dict(id=i+1, doubles=d, singles=s, length=d*1200+s//2*1000)
@@ -59,6 +60,43 @@ def different_product_model(left, right):
                 and not (first and second and (first_numbers == second_numbers[:len(first_numbers)]
                                                or second_numbers == first_numbers[:len(second_numbers)])))
 
+@lru_cache(maxsize=8192)
+def tula_model(name):
+    """Read complete identifiers from the short cabinet, file cabinet and safe names used in Tula."""
+    title = without_komus_prefix(name).upper()
+    category = re.match(r'(ШКАФ|КАРТОТЕКА|АНТРЕСОЛЬ|СЕЙФ)\b', title)
+    if not category:
+        return None
+    latin = title.translate(str.maketrans('АВСЕНКМОРТХ–—−', 'ABCEHKMOPTX---'))
+    code = r'(?<![A-ZА-Я0-9])(?:ML/LS|AFC|RUS|LS|ML|CB|AMH|AM|TM|SL|A|M)[ .-]?\d+[A-Z]*(?:[-/]\d+[A-Z]*)*(?![\w/-])'
+    model = re.search(code, latin)
+    if not model:
+        return None
+    # An alternative identifier must be explicitly written next to the primary model.
+    alias = re.match(r'\s*\(\s*('+code+r')\s*\)', latin[model.end():])
+    variants = (
+        bool(re.search(r'КОМУС\s+МЕБЕЛЬ', title)),
+        'УСИЛЕНН' in title,
+        'СТАНДАРТ' in title,
+        bool(re.search(r'\b(?:EL|ЭЛ)\b|ЭЛЕКТР', title)),
+        tuple(sorted(set(re.findall(r'АНТРАЦИТ|СЕРЫЙ|БЕЛЫЙ|Ч[ЕЁ]РНЫЙ|RAL\s*\d+', title)))),
+    )
+    size = re.search(r'(?<!\d)(\d{2,4})\s*X\s*(\d{2,4})\s*X\s*(\d{2,4})(?!\d)', latin)
+    sections = re.search(r'(\d+)\s*[- ]?\s*(?:СЕКЦ|ОТДЕЛЕН|ДВЕР)', title)
+    return (category[1], normalize(model[0]), normalize(alias[1]) if alias else '', variants,
+            size.groups() if size else (), sections[1] if sections else '')
+
+def same_tula_model(left, right):
+    if not left or not right:
+        return False
+    category, model, alias, variants, size, sections = left
+    other_category, other_model, other_alias, other_variants, other_size, other_sections = right
+    same_model = (model == other_model or (not other_alias and alias == other_model)
+                  or (not alias and model == other_alias))
+    return (category == other_category and same_model and variants == other_variants
+            and (not size or not other_size or size == other_size)
+            and (not sections or not other_sections or sections == other_sections))
+
 def resolve_catalog_product(product, catalog):
     candidates, matched_article = article_candidates(product, catalog)
     if matched_article:
@@ -66,9 +104,19 @@ def resolve_catalog_product(product, catalog):
             return candidates[0]
         reason = 'Артикулы расходятся' if not candidates else 'Артикул соответствует нескольким строкам'
         raise ValueError(f'{reason} в справочнике Тула. Проверьте артикулы Комуса и ПРОМЕТ.')
-    for name in (product.get('prometName'), product.get('name')):
+    names = (product.get('prometName'), product.get('name'))
+    for name in names:
         key = product_name_key(name)
         matches = [row for row in candidates if key and product_name_key(row.get('name')) == key]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            raise ValueError('В справочнике Тула несколько строк с таким названием. Укажите артикул.')
+    for name in names:
+        model = tula_model(name or '')
+        if not model:
+            continue
+        matches = [row for row in candidates if same_tula_model(model, tula_model(row.get('name') or ''))]
         if len(matches) == 1:
             return matches[0]
         if matches:

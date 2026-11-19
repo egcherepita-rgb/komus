@@ -53,6 +53,27 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual({p['capacity'] for p in plan['trucks'][0]['pallets']},{22})
         correct['sku']='S23099404603'
         self.assertIn('Артикулы расходятся',run([ordered],[correct,misleading])['issues'][0]['reason'])
+    def test_tula_short_name_uses_only_unique_complete_model_and_product_variant(self):
+        catalog=[
+            cat('Шкаф для раздевалок Стандарт LS-21-600',cap=20),
+            cat('Шкаф для раздевалок Стандарт LS-21-60D',cap=8),
+            cat('Шкаф CB-12',cap=14),
+            cat('Шкаф Комус Мебель CB-12',cap=28),
+            cat('Сейф Cobalt RUS-17',cap=40),
+            cat('Сейф Cobalt RUS-17 EL',cap=80),
+        ]
+        orders=[
+            row(1,'Шкаф для одежды металлический 0MX_Стандарт LS-21-60 (LS-21-600)',10*20),
+            row(2,'Шкаф для бумаг 0MX_CB-12 850х400х1860',6*14),
+            row(3,'Сейф COBALT RUS-17 EL мебельный, электр.замок',10*80),
+        ]
+        plan=run(orders,catalog)
+        self.assertEqual(len(plan['trucks']),1)
+        self.assertEqual({p['rowId']:p['capacity'] for p in plan['trucks'][0]['pallets']},
+                         {'1':20,'2':14,'3':80})
+        self.assertEqual(len(run([orders[2]],catalog[:-1])['issues']),1)
+        duplicate=cat('Шкаф CB-12 стальной',cap=14)
+        self.assertEqual(len(run([orders[1]],catalog+[duplicate])['issues']),1)
     def test_complex_and_odd_capacity_block(self):
         p=run([row(1,'A',26),row(2,'B',26)],[cat('A','split',3),cat('B',needsReview=True)])
         self.assertEqual(len(p['issues']),2);self.assertFalse(p['trucks'])
