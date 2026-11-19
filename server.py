@@ -5,7 +5,7 @@ from pathlib import Path
 import hashlib, hmac, json, mimetypes, os, secrets, sqlite3, time, threading
 from datetime import date
 from planner import build_plan, LAYOUTS
-from importer import catalog_import, export_plan
+from importer import calculate_pallets, catalog_import, export_plan, pallet_template
 import ledger_store
 from workflow import empty_state,public_state,make_plan,apply_import,update_row,dispatch,now,today,canonical_order,validate_row
 from workflow import clear_plan, transition_row
@@ -125,6 +125,7 @@ class Handler(BaseHTTPRequestHandler):
                 if path=='/api/v2/state':
                     rev,state=ledger_store.read(DATA);return self.send(200,envelope(rev,state))
                 if path=='/api/v2/templates/order':data=template_file('order');filename='komus-new-order.xlsx'
+                elif path=='/api/v2/templates/pallets':data=pallet_template();filename='komus-pallets-template.xlsx'
                 elif path=='/api/v2/templates/response':
                     rev,state=ledger_store.read(DATA);order=query.get('order',[''])[0]
                     rows=[r for r in state['rows'] if not order or r.get('order')==order]
@@ -175,6 +176,10 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/v2/import-preview':
                 revheader=self.headers.get('X-Komus-Revision')
                 return self.send(200,preview_import(self.body(),query,int(revheader) if revheader is not None else None))
+            if path=='/api/v2/pallets':
+                raw=self.body(15*1024*1024)
+                _,state=ledger_store.read(DATA)
+                return self.send(200,calculate_pallets(raw,state['catalog']))
             data=json.loads(self.body());expected=data.get('revision')
             if path=='/api/v2/import-apply':
                 token=data.get('token','')

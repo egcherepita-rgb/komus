@@ -52,6 +52,39 @@ class ServerTests(unittest.TestCase):
         for path in ('/.env','/data/komus.db','/../server.py'):
             with self.assertRaises(urllib.error.HTTPError) as e:self.request(c,path)
             self.assertEqual(e.exception.code,404)
+    def test_pallet_template_and_calculation_use_catalog_without_changing_ledger(self):
+        client = self.client()
+        state = server.demo()
+        state['catalog'] += [
+            {'name':'Шкаф ML-11-50D','type':'split','capacity':0,'original':'22*2п','needsReview':True},
+            {'name':'Планка-ограничитель MS-60','type':'loose','capacity':1},
+        ]
+        ledger_store.mutate(server.DATA,0,lambda current:current.update(state))
+        before = json.load(self.request(client,'/api/v2/state'))
+        template = self.request(client,'/api/v2/templates/pallets').read()
+        book = load_workbook(BytesIO(template))
+        self.assertEqual(tuple(c.value for c in book.active[1]),('Наименование товара','Количество'))
+        for row in (
+            ['Шкаф ML-11-50D',67],
+            ['Шкаф ML-11-50D',22],
+            ['Демонстрационный шкаф',41],
+            ['Демонстрационный сейф',31],
+            ['Планка-ограничитель MS-60',3],
+            ['Нет в справочнике',1],
+            ['Демонстрационный сейф','ошибка'],
+        ):
+            book.active.append(row)
+        raw = BytesIO()
+        book.save(raw)
+        result = json.load(self.request(client,'/api/v2/pallets',raw.getvalue(),raw=True))
+        self.assertEqual(result['sheet'],'Паллеты')
+        keys=('redFull','blackFull','redHalf','remainder')
+        self.assertEqual([tuple(r[k] for k in keys) for r in result['rows'][:5]],
+                         [(1,0,1,1),(0,0,1,0),(0,2,0,1),(0,0,3,1),(0,0,0,0)])
+        self.assertEqual(result['rows'][4]['note'],'Без отдельной паллеты')
+        self.assertIn('Нет однозначного совпадения',result['rows'][5]['error'])
+        self.assertIn('целое число',result['rows'][6]['error'])
+        self.assertEqual(json.load(self.request(client,'/api/v2/state')),before)
     def test_bulk_request_contains_all_open_orders_and_only_open_rows(self):
         c=self.client();state=wf.empty_state()
         def row(rid,order,shipped=0):

@@ -105,6 +105,23 @@ const allLayouts = JSON.parse(require('node:child_process').execFileSync('python
   '-c', 'from planner import LAYOUTS; import json; print(json.dumps(LAYOUTS))',
 ], { cwd: path.join(__dirname, '..'), encoding: 'utf8' }));
 
+test('pallet calculator uploads a workbook and renders calculations and unmatched rows', async () => {
+  const c = client({ upload: false });
+  const workbook = { name: 'pallets.xlsx', size: 100 };
+  c.element('palletsFile').files = [workbook];
+  c.replies.push({ sheet: 'Паллеты', rows: [
+    { line: 2, name: 'Шкаф', quantity: 67, capacity: 22, redFull: 1, blackFull: 0, redHalf: 1, remainder: 1 },
+    { line: 3, name: 'Другая позиция', quantity: 1, error: 'Нет в справочнике' },
+  ] });
+  await c.run("$('palletsForm').onsubmit({preventDefault(){}})");
+  assert.equal(c.calls[0].url, '/api/v2/pallets');
+  assert.equal(c.calls[0].options.body, workbook);
+  assert.equal(c.element('palletsResults').hidden, false);
+  assert.match(c.element('palletsResults').innerHTML, /Красная 0,5/);
+  assert.match(c.element('palletsResults').innerHTML, /Нет в справочнике/);
+  assert.match(c.element('palletsStatus').textContent, /Рассчитано 1 из 2/);
+});
+
 test('manual shipment uses the quantity for this shipment and confirms before saving', async () => {
   const c = client({ upload: false });
   c.run("state={rows:[{id:'row1',order:'QA-1',name:'Товар',qty:50,shipped:10,reserved:20}]}; revision=4; render=()=>{}");

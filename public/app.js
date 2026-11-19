@@ -26,6 +26,38 @@ async function action(path,data={}){if(busy)return;lock(true);try{const r=await 
 function tab(name){document.querySelectorAll('section[id^="view-"]').forEach(s=>s.hidden=s.id!=='view-'+name);document.querySelectorAll('nav [data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));if(name==='layouts')loadLayouts().catch(()=>{});}
 function table(headers,rows,empty='Пока нет данных'){return `<table><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.length?rows.map(r=>'<tr>'+r.map(c=>'<td>'+c+'</td>').join('')+'</tr>').join(''):`<tr><td colspan="${headers.length}">${esc(empty)}</td></tr>`}</tbody></table>`;}
 function download(path){if(readOnly){banner('Войдите в приложение, чтобы скачать рабочий шаблон.');return;}const a=document.createElement('a');a.href=path;a.download='';document.body.append(a);a.click();a.remove();}
+function renderPalletCalculation(result){
+ const cols=['Строка Excel','Товар','Количество, шт.','Шт. в паллете','Красная 1','Чёрная 1','Красная 0,5','Остаток, шт.','Примечание'];
+ const values=result.rows.map(r=>[
+  fmt(r.line),esc(r.name),esc(r.quantity),r.capacity?fmt(r.capacity):'—',
+  ...['redFull','blackFull','redHalf','remainder'].map(key=>r.error?'—':fmt(r[key])),
+  r.error?`<span class="tag amber">${esc(r.error)}</span>`:esc(r.note||'')
+ ]);
+ const errors=result.rows.filter(r=>r.error).length;
+ $('palletsResults').innerHTML=table(cols,values);
+ $('palletsResults').hidden=false;
+ $('palletsStatus').textContent=`Лист «${result.sheet}». Рассчитано ${result.rows.length-errors} из ${result.rows.length} позиций.`+
+  (errors?` Требуют проверки: ${errors}.`:'');
+}
+$('palletsFile').onchange=()=>{
+ $('palletsResults').hidden=true;
+ $('palletsStatus').textContent='';
+};
+$('palletsForm').onsubmit=async event=>{
+ event.preventDefault();
+ const input=$('palletsFile'),button=$('calculatePallets'),file=input.files[0];
+ if(readOnly||button.disabled||!file)return;
+ input.disabled=button.disabled=true;
+ $('palletsResults').hidden=true;
+ $('palletsStatus').textContent='Считаем паллеты…';
+ try{
+  renderPalletCalculation(await request('v2/pallets',{body:file,raw:true}));
+ }catch(error){
+  $('palletsStatus').textContent=error.message;
+ }finally{
+  input.disabled=button.disabled=false;
+ }
+};
 function fileTable(files){return table(['Тип','Файл / лист','Когда загружен','Строк','Исходник'],files.slice().reverse().map(f=>[esc(importNames[f.kind]||f.kind),esc(f.filename)+(f.sheet?`<small class="row-note">${esc(f.sheet)}</small>`:''),esc(datefmt(f.at)),fmt(f.lines),`<button class="compact-action" data-download="/api/v2/source?sha=${esc(f.sha)}">Скачать</button>`]));}
 function sumTruck(t){return [...t.pallets,...t.loose].reduce((s,p)=>s+p.qty,0);}
 function summary(t){const map=new Map();for(const p of [...t.pallets,...t.loose]){const k=p.rowId;const item=map.get(k)||{...p,qty:0,places:0,partialCount:0};item.qty+=p.qty;item.places+=p.type==='loose'?0:1;item.partialCount+=p.partial?1:0;map.set(k,item);}return [...map.values()];}

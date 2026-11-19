@@ -5,7 +5,10 @@ import re, zipfile
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.styles.colors import COLOR_INDEX
-from planner import LIMITER_PLACEMENT, apply_two_pallet_notation, article_key, pallet_limiter_model
+from planner import (LIMITER_PLACEMENT, apply_two_pallet_notation, article_key, number,
+                     pallet_capacity, pallet_limiter_model, resolve_catalog_product)
+
+PALLET_HEADERS = ('Наименование товара', 'Количество')
 
 def workbook(raw):
     if len(raw)>15*1024*1024: raise ValueError('Файл больше 15 МБ')
@@ -14,6 +17,72 @@ def workbook(raw):
             if sum(i.file_size for i in z.infolist())>80*1024*1024: raise ValueError('Слишком большой распакованный Excel')
         return load_workbook(BytesIO(raw),data_only=True)
     except (zipfile.BadZipFile,KeyError,OSError): raise ValueError('Нужен корректный файл .xlsx')
+
+def pallet_template():
+    book = Workbook()
+    sheet = book.active
+    sheet.title = 'Паллеты'
+    sheet.append(PALLET_HEADERS)
+    for cell in sheet[1]:
+        cell.font = Font(color='FFFFFF', bold=True)
+        cell.fill = PatternFill('solid', fgColor='005BA8')
+    sheet.column_dimensions['A'].width = 68
+    sheet.column_dimensions['B'].width = 18
+    sheet.freeze_panes = 'A2'
+    output = BytesIO()
+    book.save(output)
+    return output.getvalue()
+
+def calculate_pallets(raw, catalog):
+    if not catalog:
+        raise ValueError('Сначала загрузите справочник во вкладке «Кратность Тула».')
+    book = workbook(raw)
+    for sheet in book:
+        for line, cells in enumerate(sheet.iter_rows(max_row=min(25, sheet.max_row), values_only=True), 1):
+            titles = [' '.join(str(value or '').casefold().split()).rstrip(':') for value in cells]
+            name_col = next((i for i, title in enumerate(titles)
+                             if title in ('наименование товара', 'наименование')), None)
+            qty_col = next((i for i, title in enumerate(titles)
+                            if title in ('количество', 'количество, шт.', 'кол.', 'кол-во', 'кол-во, шт.')), None)
+            if name_col is not None and qty_col is not None:
+                return calculate_pallet_rows(sheet, line, name_col, qty_col, catalog)
+    raise ValueError('В Excel нужны колонки «Наименование товара» и «Количество». Скачайте шаблон во вкладке «Паллеты».')
+
+def calculate_pallet_rows(sheet, header_line, name_col, qty_col, catalog):
+    if sheet.max_row - header_line > 5000:
+        raise ValueError('В одном расчёте допускается до 5 000 строк.')
+    rows = []
+    for line, cells in enumerate(sheet.iter_rows(min_row=header_line + 1, values_only=True), header_line + 1):
+        name = str(cells[name_col] or '').strip()
+        quantity = cells[qty_col]
+        if not name and quantity in (None, ''):
+            continue
+        result = {'line': line, 'name': name, 'quantity': str(quantity) if quantity is not None else ''}
+        rows.append(result)
+        try:
+            if not name:
+                raise ValueError('Укажите наименование товара.')
+            result['quantity'] = number(quantity, 'Количество', allow_zero=False)
+            item = dict(resolve_catalog_product({'name': name}, catalog))
+            apply_two_pallet_notation(item)
+            if item.get('needsReview'):
+                raise ValueError('Проверьте кратность товара в справочнике Тула.')
+            kind = item.get('type')
+            if kind == 'loose':
+                result.update(redFull=0, blackFull=0, redHalf=0, remainder=0, note='Без отдельной паллеты')
+                continue
+            if kind not in ('split', 'double', 'single'):
+                raise ValueError('Проверьте тип паллеты в справочнике Тула.')
+            capacity = pallet_capacity(item)
+            pallets, remainder = divmod(result['quantity'], capacity)
+            red_full, red_half = divmod(pallets, 2) if kind == 'split' else (0, 0)
+            result.update(capacity=capacity, redFull=red_full, blackFull=pallets if kind == 'double' else 0,
+                          redHalf=pallets if kind == 'single' else red_half, remainder=remainder)
+        except ValueError as error:
+            result['error'] = str(error)
+    if not rows:
+        raise ValueError('В файле нет заполненных строк.')
+    return {'sheet': sheet.title, 'rows': rows}
 
 def red(cell):
     c=cell.font.color
