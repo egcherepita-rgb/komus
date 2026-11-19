@@ -77,6 +77,28 @@ class WorkflowTests(unittest.TestCase):
         s=state();headers=['Номер счета','Наименование','Дата подтвержденная','Дата ответа']
         p=parse_response(xlsx(headers,[['IO2','A',TODAY,TODAY]]),'Data',2026,s)
         self.assertFalse(p['errors']);self.assertEqual(p['changes'][0]['rowId'],'r2')
+    def test_initial_pallet_split_notes_do_not_change_product_or_quantity(self):
+        first='Шкаф для раздевалок Стандарт LS-21-600'
+        second='Шкаф для одежды металлический Комус Мебель ML-11-30'
+        invalid_note='Шкаф ML-11-50D 22=11+10'
+        raw=xlsx(['№ заказа:','Номер счета','Наименование','Кол.'],[
+            ['O1','I1',first+' 80=20+60',80],
+            ['O2','I2',second+' 64 = 32 + 32',64],
+            ['O3','I3',invalid_note,22],
+        ])
+        parsed=parse_initial(raw,'Data',2026,'remaining')
+        self.assertFalse(parsed['errors'])
+        self.assertEqual([(r['name'],r['qty']) for r in parsed['rows']],
+                         [(first,80),(second,64),(invalid_note,22)])
+
+        # A reply with the clean name also finds rows imported before the fix.
+        s=state()
+        s['rows']=parsed['rows']
+        s['rows'][0]['name']=first+' 80=20+60'
+        headers=['Номер счета','Наименование','Дата подтвержденная','Дата ответа']
+        reply=parse_response(xlsx(headers,[['I1',first,TODAY,TODAY]]),'Data',2026,s)
+        self.assertFalse(reply['errors'])
+        self.assertEqual(reply['changes'][0]['rowId'],s['rows'][0]['id'])
     def test_quantity_disambiguates_same_product_in_same_order(self):
         s=state();other=base_row('r3','O1',qty=520);other['position']='20';s['rows'].append(other)
         row=response(other);row[0]='';row[2]=''

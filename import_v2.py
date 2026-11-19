@@ -15,6 +15,15 @@ REPLY_HEADERS=['ID строки','№ заказа Комуса','Номер с�
 
 def header(v):return re.sub(r'\s+',' ',clean(v).lower().replace('ё','е').rstrip(':'))
 def text(v):return str(int(v)) if isinstance(v,float) and v.is_integer() else clean(v)
+
+def without_pallet_split_note(name, quantity):
+    """Remove a trailing quantity breakdown only when it agrees with the order."""
+    value=text(name)
+    match=re.search(r'\s+([1-9]\d{0,6})\s*=\s*([1-9]\d{0,6}(?:\s*\+\s*[1-9]\d{0,6})+)\Z',value)
+    if match and int(match[1])==quantity and sum(map(int,match[2].split('+')))==quantity:
+        return value[:match.start()]
+    return value
+
 def strict_date(v,year,label,required=True):
     result=parse_date(v,year)
     if required and not result:raise ValueError('Укажите корректную дату: '+label)
@@ -70,7 +79,7 @@ def parse_initial(raw,sheet,year,mode):
             q=number(v('qty'),'Количество'); shipped=0 if mode=='remaining' else number(v('shipped') or 0,'Отгружено')
             if q==0:continue
             position=text(v('position')) or 'И-'+str(rr[0].row)
-            r={'id':uid(),'order':order,'position':position,'invoice':invoice,'name':text(v('name')),
+            r={'id':uid(),'order':order,'position':position,'invoice':invoice,'name':without_pallet_split_note(v('name'),q),
                'sku':text(v('sku')),'komusSku':text(v('komusSku')),'qty':q,'shipped':shipped,
                'due':strict_date(v('due'),year,'Отгрузить до',False),'lots':[],
                'internalPosition':v('position') in (None,''),'source':f'{sheet}!{rr[0].row}','replyAsOf':''}
@@ -125,9 +134,14 @@ def parse_response(raw,sheet,year,state):
             if matched_article and not candidates:
                 raise ValueError('Артикул Комуса найден, но артикул ПРОМЕТ расходится с заказом.')
             if not matched_article:
-                name_key=product_name_key(product['name'])
-                candidates=[r for r in candidates if name_key and name_key in
-                            (product_name_key(r['name']),product_name_key(r.get('prometName')))]
+                matches=[]
+                for r in candidates:
+                    name_key=product_name_key(without_pallet_split_note(product['name'],r['qty']))
+                    known_keys={product_name_key(without_pallet_split_note(r.get(field),r['qty']))
+                                for field in ('name','prometName')}
+                    if name_key and name_key in known_keys:
+                        matches.append(r)
+                candidates=matches
             candidates=[r for r in candidates if (not rid or r['id']==rid)
                         and (quantity is None or r['qty']==quantity)]
             if not candidates:raise ValueError('Не найден товар с указанным заказом / счётом, артикулом и количеством. Проверьте реквизиты.')
@@ -145,11 +159,13 @@ def parse_response(raw,sheet,year,state):
                 for field in ('sku','komusSku'):
                     if not r.get(field) and product[field]:
                         change[field]=product[field]
-                if product['name'] and product['name']!=r['name']:
-                    if different_product_model(r.get('prometName') or r['name'],product['name']):
+                proposed=without_pallet_split_note(product['name'],r['qty'])
+                current=without_pallet_split_note(r.get('prometName') or r['name'],r['qty'])
+                if proposed and proposed!=current:
+                    if different_product_model(current,proposed):
                         name_warnings.append(f'Строка {line}: артикул совпал, но модель или числа в названии отличаются. Наименование для справочника не обновлено.')
                     else:
-                        change['prometName']=product['name']
+                        change['prometName']=proposed
             changes.append(change)
         except ValueError as e:errors.append({'line':line,'name':text(g('Наименование')),'reason':str(e)})
     return {'changes':changes,'errors':errors,'count':len(changes),'warnings':[
