@@ -1,4 +1,5 @@
 """Deterministic pallet placement. No product/order mixing within a pallet."""
+from bisect import bisect_right
 from datetime import date, timedelta
 from functools import lru_cache
 import re
@@ -267,6 +268,101 @@ def whole_pallets(r,left,cap):
             if not source['qty']:index+=1
         yield {'qty':cap,'ready':ready,'lotAllocations':allocations}
 
+def allocate_trucks(pallets, loose, start, horizon, daily_used, strategy, schedule=None):
+    trucks=[]
+    def priority(p): return (p['due'],p['ready'],p['rowId'])
+    for offset in range(horizon):
+        day=start+timedelta(days=offset)
+        if day.weekday()>4: continue
+        if schedule is not None and day.isoformat() not in schedule: continue
+        daily_layouts = LAYOUTS if schedule is None else [schedule[day.isoformat()]]
+        for slot in range(2 if schedule is None else 1):
+            if slot < (daily_used or {}).get(day.isoformat(),0): continue
+            available=sorted((p for p in pallets if p['ready']<=day.isoformat()),key=priority)
+            if slot==1 and not any(workdays(date.fromisoformat(p['due']),day)>3 for p in available): break
+            doubles=[p for p in available if p['type']=='double']; singles=[p for p in available if p['type']=='single']
+            candidates=[]
+            ranks={id(p):n for n,p in enumerate(available)}
+            for layout in daily_layouts:
+                d,s=layout['doubles'],layout['singles']
+                if len(doubles)<d or len(singles)<s: continue
+                selected=doubles[:d]+singles[:s]
+                urgent=sum(max(0,(day-date.fromisoformat(p['due'])).days)+1 for p in selected)
+                # Rank earliest deadlines first, then carried pallet count / length.
+                deadline_score=tuple(-ranks[id(p)] for p in sorted(selected,key=priority))
+                if strategy=='compact': score=(len(selected),layout['length'],deadline_score)
+                elif strategy=='balanced': score=(sum(p['due']<=day.isoformat() for p in selected),len(selected),urgent)
+                else: score=(deadline_score,len(selected),layout['length'])
+                candidates.append((score,layout,selected))
+            if not candidates: break
+            _,layout,selected=max(candidates,key=lambda c:c[0])
+            chosen={id(p) for p in selected}; pallets=[p for p in pallets if id(p) not in chosen]
+            attached=[p for p in loose if p['ready']<=day.isoformat()]
+            loose=[p for p in loose if p not in attached]
+            trucks.append({'id':len(trucks)+1,'date':day.isoformat(),'slot':slot+1,'layout':layout,
+                           'pallets':selected,'loose':attached,'late':sum(p['due']<day.isoformat() for p in selected),
+                           'secondReason':'Просрочка доступного груза более 3 рабочих дней' if slot else ''})
+    return trucks
+
+def fuller_schedule(pallets, start, horizon, daily_used, current_trucks):
+    """Look ahead on small batches where changing the mix may save another full truck."""
+    if not pallets or len(pallets) > 250:
+        return None
+    arrivals = {'double': [], 'single': []}
+    for pallet in pallets:
+        arrivals[pallet['type']].append(pallet['ready'])
+    doubles = sorted(arrivals['double'])
+    singles = sorted(arrivals['single'])
+    if (2*len(doubles)+len(singles))//min(2*x['doubles']+x['singles'] for x in LAYOUTS) <= len(current_trucks):
+        return None
+
+    days = []
+    for offset in range(horizon):
+        day = start+timedelta(days=offset)
+        if day.weekday() >= 5:
+            continue
+        iso_day = day.isoformat()
+        if not (daily_used or {}).get(iso_day):
+            days.append((iso_day, bisect_right(doubles,iso_day), bisect_right(singles,iso_day)))
+
+    @lru_cache(maxsize=None)
+    def best(index, used_double, used_single):
+        if index == len(days):
+            return 0, 0
+        _, available_double, available_single = days[index]
+        score = best(index+1,used_double,used_single)
+        for layout in LAYOUTS:
+            next_double = used_double+layout['doubles']
+            next_single = used_single+layout['singles']
+            if next_double > available_double or next_single > available_single:
+                continue
+            count, loaded = best(index+1,next_double,next_single)
+            score = max(score,(count+1,loaded+layout['doubles']+layout['singles']))
+        return score
+
+    if best(0,0,0)[0] <= len(current_trucks):
+        return None
+    schedule = {}
+    preferred = {truck['date']:truck['layout']['id'] for truck in current_trucks if truck['slot'] == 1}
+    used_double = used_single = 0
+    for index,(day, available_double, available_single) in enumerate(days):
+        score = best(index,used_double,used_single)
+        if not score[0]:
+            break
+        # Keep the original strategy's choice when it still permits the better plan.
+        layouts = sorted(LAYOUTS,key=lambda layout: layout['id'] != preferred.get(day))
+        for layout in layouts:
+            next_double = used_double+layout['doubles']
+            next_single = used_single+layout['singles']
+            if next_double > available_double or next_single > available_single:
+                continue
+            count, loaded = best(index+1,next_double,next_single)
+            if (count+1,loaded+layout['doubles']+layout['singles']) == score:
+                schedule[day] = layout
+                used_double, used_single = next_double,next_single
+                break
+    return schedule
+
 def build_plan(rows, catalog, start, strategy='urgent', reconciled=False, horizon=120, daily_used=None):
     if not reconciled: raise ValueError('Сначала подтвердите сверку остатков с уже отгруженными рейсами.')
     if strategy not in ('urgent','compact','balanced'): raise ValueError('Неизвестный вариант расчёта')
@@ -306,38 +402,16 @@ def build_plan(rows, catalog, start, strategy='urgent', reconciled=False, horizo
         except ValueError as e:
             issues.append({'rowId':rid,'name':r.get('name',''),'reason':str(e)})
             reasons[rid]=str(e)
-    trucks=[]
-    def priority(p): return (p['due'],p['ready'],p['rowId'])
-    for offset in range(horizon):
-        day=start+timedelta(days=offset)
-        if day.weekday()>4: continue
-        for slot in range(2):
-            if slot < (daily_used or {}).get(day.isoformat(),0): continue
-            available=sorted((p for p in pallets if p['ready']<=day.isoformat()),key=priority)
-            if slot==1 and not any(workdays(date.fromisoformat(p['due']),day)>3 for p in available): break
-            doubles=[p for p in available if p['type']=='double']; singles=[p for p in available if p['type']=='single']
-            candidates=[]
-            ranks={id(p):n for n,p in enumerate(available)}
-            for layout in LAYOUTS:
-                d,s=layout['doubles'],layout['singles']
-                if len(doubles)<d or len(singles)<s: continue
-                selected=doubles[:d]+singles[:s]
-                urgent=sum(max(0,(day-date.fromisoformat(p['due'])).days)+1 for p in selected)
-                # Rank earliest deadlines first, then carried pallet count / length.
-                deadline_score=tuple(-ranks[id(p)] for p in sorted(selected,key=priority))
-                if strategy=='compact': score=(len(selected),layout['length'],deadline_score)
-                elif strategy=='balanced': score=(sum(p['due']<=day.isoformat() for p in selected),len(selected),urgent)
-                else: score=(deadline_score,len(selected),layout['length'])
-                candidates.append((score,layout,selected))
-            if not candidates: break
-            _,layout,selected=max(candidates,key=lambda c:c[0])
-            chosen={id(p) for p in selected}; pallets=[p for p in pallets if id(p) not in chosen]
-            attached=[p for p in loose if p['ready']<=day.isoformat()]
-            loose=[p for p in loose if p not in attached]
-            for p in selected+attached: remaining[p['rowId']]-=p['qty']
-            trucks.append({'id':len(trucks)+1,'date':day.isoformat(),'slot':slot+1,'layout':layout,
-                           'pallets':selected,'loose':attached,'late':sum(p['due']<day.isoformat() for p in selected),
-                           'secondReason':'Просрочка доступного груза более 3 рабочих дней' if slot else ''})
+    trucks=allocate_trucks(pallets,loose,start,horizon,daily_used,strategy)
+    schedule=fuller_schedule(pallets,start,horizon,daily_used,trucks)
+    if schedule:
+        alternative=allocate_trucks(pallets,loose,start,horizon,daily_used,strategy,schedule)
+        if (len(alternative)>len(trucks)
+                and sum(len(t['pallets']) for t in alternative)>=sum(len(t['pallets']) for t in trucks)):
+            trucks=alternative
+    for truck in trucks:
+        for pallet in truck['pallets']+truck['loose']:
+            remaining[pallet['rowId']]-=pallet['qty']
     leftovers=[]
     for rid,left in remaining.items():
         if left:

@@ -17,6 +17,23 @@ class PlannerTests(unittest.TestCase):
                 self.assertFalse(p['leftovers']);self.assertLessEqual(l['length'],13500)
     def test_underload_waits(self):
         p=run([row(1,'A',25)],[cat('A')]);self.assertFalse(p['trucks']);self.assertEqual(p['leftovers'][0]['qty'],25)
+    def test_lookahead_keeps_four_full_trucks_possible_with_mixed_pallets(self):
+        # Readiness distribution from a batch where greedy daily allocation fills only three trucks.
+        deliveries=[('2026-11-16',0,11),('2026-11-17',0,2),('2026-11-18',2,27),
+                    ('2026-11-21',0,3),('2026-11-22',1,0),('2026-11-23',1,4),
+                    ('2026-11-24',1,15),('2026-11-25',1,12),('2026-11-26',0,15)]
+        rows=[]
+        for index,(day,doubles,singles) in enumerate(deliveries):
+            if doubles:rows.append(row(index*2,'D',doubles,ready=day,due='2026-11-25'))
+            if singles:rows.append(row(index*2+1,'S',singles,ready=day,due='2026-11-25'))
+        plan=run(rows,[cat('D','double'),cat('S')],start='2026-11-23')
+        trucks=plan['trucks']
+        self.assertEqual([t['date'] for t in trucks],['2026-11-23','2026-11-24','2026-11-25','2026-11-26'])
+        self.assertEqual(sum(len(t['pallets']) for t in trucks),94)
+        self.assertEqual(sum(x['qty'] for x in plan['leftovers']),1)
+        for truck in trucks:
+            self.assertIn(truck['layout'],LAYOUTS)
+            self.assertTrue(all(p['ready']<=truck['date'] for p in truck['pallets']))
     def test_not_before_ready_or_weekend(self):
         p=run([row(1,'A',26,ready='2026-11-21')],[cat('A')])
         self.assertEqual(p['trucks'][0]['date'],'2026-11-23')
