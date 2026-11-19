@@ -1,4 +1,4 @@
-import unittest,tempfile,threading,json,urllib.request,urllib.error,http.cookiejar
+import hashlib,unittest,tempfile,threading,json,urllib.request,urllib.error,http.cookiejar
 from pathlib import Path
 from io import BytesIO
 from openpyxl import load_workbook
@@ -73,6 +73,43 @@ class ServerTests(unittest.TestCase):
         ledger_store.mutate(server.DATA,0,lambda s:s.update(old))
         with self.assertRaises(urllib.error.HTTPError) as e:self.request(c,'/api/v2/export')
         self.assertEqual(e.exception.code,400)
+    def test_build_recovers_previously_skipped_limiters_and_exports_without_places(self):
+        client=self.client()
+        initial=server.demo()
+        initial['catalog'][0]['capacity']=20  # A previous catalogue edit must survive.
+        initial['rows'].append(dict(initial['rows'][0],id='rail',position='40',
+            name='Планка-ограничитель Практик MS-30 (20шт/упак)',qty=10,
+            lots=[{'part':'1','qty':10,'ready':wf.today()}]))
+
+        book=Workbook()
+        book.active.append(['','','ТУЛА'])
+        book.active.append(['','ВП','Наименование','Кратность'])
+        book.active.append(['0.5','','Демонстрационный сейф',10])
+        book.active.append([0,'','Планка огр. MS-30 (20шт)',5])
+        book.active.append([0,'','Планка огр. MS-60 (20шт)',5])
+        buf=BytesIO()
+        book.save(buf)
+        raw=buf.getvalue()
+        meta={'kind':'catalog','sha':hashlib.sha256(raw).hexdigest(),'filename':'catalog.xlsx','at':wf.now()}
+        initial['imports'].append(meta)
+        rev,_,_=ledger_store.mutate(server.DATA,0,lambda s:s.update(initial),upload=(meta,raw))
+
+        result=json.load(self.request(client,'/api/v2/build',{'revision':rev}))
+        result=json.load(self.request(client,'/api/v2/build',{'revision':result['revision']}))
+        state=result['state']
+        self.assertEqual(len(state['catalog']),4)
+        self.assertEqual(state['catalog'][0]['capacity'],20)
+        truck=state['plan']['trucks'][0]
+        self.assertEqual(len(truck['pallets']),26)
+        self.assertEqual(sum(item['qty'] for item in truck['loose']),10)
+        self.assertTrue(all(item['fixation']=='Сверху на одной из паллет машины' for item in truck['loose']))
+
+        exported=load_workbook(BytesIO(self.request(client,'/api/v2/export').read()),data_only=True)
+        places=[row[1] for row in exported['Расстановка'].values if row[6]=='loose']
+        self.assertEqual(places,['Без отдельного места']*2)
+        result=json.load(self.request(client,'/api/v2/dispatch',{
+            'revision':result['revision'],'planId':state['plan']['id'],'truckId':truck['id'],'actualDate':wf.today()}))
+        self.assertEqual(next(row['shipped'] for row in result['state']['rows'] if row['id']=='rail'),10)
     def test_transition_and_reset_persist_without_clearing_recorded_shipments(self):
         c=self.client()
         initial=server.demo()

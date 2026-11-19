@@ -17,6 +17,15 @@ def without_komus_prefix(value):
 def product_name_key(value):
     return normalize(without_komus_prefix(value))
 
+LIMITER_PLACEMENT = 'Сверху на одной из паллет машины'
+
+def pallet_limiter_model(name):
+    title = without_komus_prefix(name).upper().translate(str.maketrans('МС–—', 'MC--'))
+    match = re.fullmatch(
+        r'\s*ПЛАНКА\s*-?\s*(?:ОГРАНИЧИТЕЛЬ|ОГР\.?)\s+(?:ПРАКТИК\s+)?'
+        r'MS\s*-?\s*(30|60)(?:\s*\(\s*20\s*ШТ\.?\s*(?:/\s*УПАК\.?)?\s*\))?\s*', title)
+    return f'MS-{match[1]}' if match else ''
+
 def article_key(value):
     value = str(value if value is not None else '').strip().upper()
     if re.fullmatch(r'\d+\.0+', value):
@@ -66,7 +75,12 @@ def different_product_model(left, right):
 @lru_cache(maxsize=8192)
 def tula_model(name):
     """Read complete identifiers from the short cabinet, file cabinet and safe names used in Tula."""
-    title = without_komus_prefix(name).upper()
+    limiter = pallet_limiter_model(name)
+    if limiter:
+        return ('ПЛАНКА', limiter, '', (), (), '')
+    title = without_komus_prefix(name).upper().strip()
+    if re.fullmatch(r'(?:КОМУС\s+МЕБЕЛЬ\s+)?ML[-–—]24[-–—]60', title):
+        title = 'ШКАФ ДЛЯ СУМОК ' + title
     category = re.match(r'(ШКАФ|КАРТОТЕКА|АНТРЕСОЛЬ|СЕЙФ)\b', title)
     if not category:
         return None
@@ -86,7 +100,13 @@ def tula_model(name):
     )
     size = re.search(r'(?<!\d)(\d{2,4})\s*X\s*(\d{2,4})\s*X\s*(\d{2,4})(?!\d)', latin)
     sections = re.search(r'(\d+)\s*[- ]?\s*(?:СЕКЦ|ОТДЕЛЕН|ДВЕР)', title)
-    return (category[1], normalize(model[0]), normalize(alias[1]) if alias else '', variants,
+    kind, model_code = category[1], normalize(model[0])
+    # These two catalogue names identify the same products in the Komus order.
+    if model_code == 'ML2460' and kind == 'ШКАФ':
+        variants = (False, False, *variants[2:])
+    if model_code == 'M08' and kind == 'АНТРЕСОЛЬ':
+        kind = 'ШКАФ'
+    return (kind, model_code, normalize(alias[1]) if alias else '', variants,
             size.groups() if size else (), sections[1] if sections else '')
 
 def same_tula_model(left, right):
@@ -249,14 +269,18 @@ def build_plan(rows, catalog, start, strategy='urgent', reconciled=False, horizo
             if c.get('needsReview'): raise ValueError('Подтвердите толкование кратности в справочнике')
             common={'rowId':rid,'name':r['name'],'order':r.get('order',''),'invoice':r.get('invoice',''),
                     'ready':ready.isoformat(),'due':due.isoformat(),'vertical':bool(c.get('vertical'))}
-            if typ=='loose' and not c.get('fixation'):raise ValueError('Для груза без места укажите способ размещения / крепления')
+            placement = c.get('fixation')
+            if typ == 'loose' and not placement:
+                if not pallet_limiter_model(c.get('name')):
+                    raise ValueError('Для груза без места укажите способ размещения / крепления')
+                placement = LIMITER_PLACEMENT
             cap=pallet_capacity(c)
             if len(pallets)+len(loose)+left//cap>20000:raise ValueError('Расчёт превышает 20 000 паллет; разделите проект')
             chunks=list(whole_pallets(r,left,cap));tails[rid]=left%cap;capacities[rid]=cap
             for chunk in chunks:
                 item=dict(common,**{'capacity':cap,'partial':False,'type':'double' if typ=='double' else 'single'})
                 item.update(chunk)
-                if typ=='loose':item.update(type='loose',fixation=c['fixation']);loose.append(item)
+                if typ=='loose':item.update(type='loose',fixation=placement);loose.append(item)
                 else:pallets.append(item)
         except ValueError as e:
             issues.append({'rowId':rid,'name':r.get('name',''),'reason':str(e)})

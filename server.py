@@ -10,7 +10,7 @@ import ledger_store
 from workflow import empty_state,public_state,make_plan,apply_import,update_row,dispatch,now,today,canonical_order,validate_row
 from workflow import clear_plan, transition_row
 from import_v2 import parse_initial,parse_order,parse_response,template_file
-from planner import number,normalize
+from planner import number, pallet_limiter_model
 
 ROOT=Path(__file__).resolve().parent
 DATA=Path(os.getenv('DATA_DIR',str(ROOT/'data')))
@@ -67,6 +67,22 @@ def preview_import(raw,query,revision):
         while len(PREVIEWS)>=3:del PREVIEWS[next(iter(PREVIEWS))]
         PREVIEWS[token]={'parsed':parsed,'meta':meta,'raw':raw,'revision':rev,'time':current}
     return dict(parsed,token=token,revision=rev,kind=kind,filename=filename)
+
+def restore_pallet_limiters(state):
+    """Recover limiters skipped by older imports while preserving catalogue edits."""
+    latest = next((entry for entry in reversed(state['imports']) if entry['kind']=='catalog'), None)
+    if not latest or state.get('checkedLimiterCatalog') == latest['sha']:
+        return
+    uploaded = ledger_store.source(DATA,latest['sha'])
+    if not uploaded:
+        return
+    existing_models = {pallet_limiter_model(item.get('name')) for item in state['catalog']}
+    existing_sources = {item.get('source') for item in state['catalog']}
+    for item in catalog_import(uploaded[1])['catalog']:
+        model = pallet_limiter_model(item['name'])
+        if item['type'] == 'loose' and model and model not in existing_models and item['source'] not in existing_sources:
+            state['catalog'].append(item)
+    state['checkedLimiterCatalog'] = latest['sha']
 
 class Handler(BaseHTTPRequestHandler):
     server_version='Komus'
@@ -193,6 +209,7 @@ class Handler(BaseHTTPRequestHandler):
                 def build(s):
                     start=data.get('start') or today();date.fromisoformat(start)
                     strategy=data.get('strategy','urgent')
+                    restore_pallet_limiters(s)
                     s['settings']={'start':start,'strategy':strategy};make_plan(s)
                     return {'message':'Полные машины собраны и сохранены.'}
                 rev,state,result=ledger_store.mutate(DATA,expected,build)

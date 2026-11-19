@@ -1,6 +1,6 @@
 import unittest, random
 from datetime import date
-from planner import build_plan,LAYOUTS,workdays
+from planner import build_plan,LAYOUTS,resolve_catalog_product,workdays
 
 START='2026-11-16'
 def row(i,name,qty,ready=START,due='2026-11-18',shipped=0):
@@ -74,6 +74,17 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(len(run([orders[2]],catalog[:-1])['issues']),1)
         duplicate=cat('Шкаф CB-12 стальной',cap=14)
         self.assertEqual(len(run([orders[1]],catalog+[duplicate])['issues']),1)
+    def test_confirmed_tula_aliases_keep_their_own_catalogue_entry(self):
+        bag_cabinet=cat('Шкаф для сумок усиленный Комус Мебель ML-24-60','split',40)
+        m08=cat('Шкаф M-08',cap=12)
+        m18=cat('Шкаф M-18',cap=24)
+        catalog=[bag_cabinet,m08,m18]
+        for name in ('ML-24-60','Комус Мебель ML-24-60','Шкаф для сумок ML-24-60',
+                     'Шкаф для сумок Комус Мебель ML-24-60'):
+            self.assertIs(resolve_catalog_product({'name':name},catalog),bag_cabinet)
+        name='Антресоль к шкафу для бумаг 0МХ_ПРАКТИК М-08 к шкафу М-18, 915х370х832'
+        self.assertIs(resolve_catalog_product({'name':name},catalog),m08)
+        self.assertTrue(run([row(1,'Антресоль M-18',24)],catalog)['issues'])
     def test_complex_and_odd_capacity_block(self):
         p=run([row(1,'A',26),row(2,'B',26)],[cat('A','split',3),cat('B',needsReview=True)])
         self.assertEqual(len(p['issues']),2);self.assertFalse(p['trucks'])

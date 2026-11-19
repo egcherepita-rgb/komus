@@ -5,7 +5,7 @@ import re, zipfile
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.styles.colors import COLOR_INDEX
-from planner import article_key
+from planner import LIMITER_PLACEMENT, article_key, pallet_limiter_model
 
 def workbook(raw):
     if len(raw)>15*1024*1024: raise ValueError('Файл больше 15 МБ')
@@ -47,14 +47,19 @@ def catalog_import(raw):
                 article_columns.setdefault('sku',cell.column-1)
     for row in s.iter_rows(min_row=3):
         if len(row)<4 or not row[2].value: continue
-        marker=str(row[0].value or '').replace(',','.').strip().rstrip('.')
+        marker_value = row[0].value
+        marker = str(marker_value if marker_value is not None else '').replace(',','.').strip().rstrip('.')
+        if marker == '0.0':
+            marker = '0'
         if marker not in ('0','0.5','1'):continue
         name=str(row[2].value).strip(); amount=str(row[3].value or '').strip()
         typ='loose' if marker=='0' else 'single' if marker=='0.5' else 'split' if red(row[0]) else 'double'
         try:cap=int(amount); review=cap<=0
         except ValueError:cap=0;review=True
         item=dict(name=name,type=typ,capacity=cap,vertical=str(row[1].value or '').strip().upper()=='ВП',
-                  original=amount,needsReview=review,fixation='',source=f'{s.title}!C{row[2].row}:D{row[2].row}')
+                  original=amount,needsReview=review,
+                  fixation=LIMITER_PLACEMENT if typ=='loose' and pallet_limiter_model(name) else '',
+                  source=f'{s.title}!C{row[2].row}:D{row[2].row}')
         for field,column in article_columns.items():
             article=article_key(row[column].value)
             if article:item[field]=article
@@ -101,7 +106,9 @@ def export_plan(plan):
     p=w.create_sheet('Расстановка');p.append(['Машина','Место','Заказ','Счёт','Наименование','Количество','Тип','ВП','Готовность','Отгрузить до','Крепление','Артикул Промет','Артикул Комуса'])
     for t in plan['trucks']:
         l=t['layout'];s.append([t['id'],t['date'],t['slot'],l['id'],l['doubles'],l['singles'],l['length'],t['secondReason']])
-        for i,r in enumerate(t['pallets']+t['loose'],1):p.append([t['id'],i,r['order'],r['invoice'],r['name'],r['qty'],r['type'],'ВП' if r['vertical'] else '',r['ready'],r['due'],r.get('fixation',''),r.get('sku',''),r.get('komusSku','')])
+        for i,r in enumerate(t['pallets']+t['loose'],1):
+            place = 'Без отдельного места' if r['type']=='loose' else i
+            p.append([t['id'],place,r['order'],r['invoice'],r['name'],r['qty'],r['type'],'ВП' if r['vertical'] else '',r['ready'],r['due'],r.get('fixation',''),r.get('sku',''),r.get('komusSku','')])
     r=w.create_sheet('Остаток');r.append(['Заказ','Счёт','Наименование','Количество','Причина'])
     for x in plan['leftovers']:r.append([x['order'],x['invoice'],x['name'],x['qty'],x['reason']])
     n=w.create_sheet('Примечания');n.append(['Условия расчёта']);n.append([plan['notice']]);n.append(['Горизонт, дней',plan['horizon']]);n.append(['Критерий полной машины: строго одна из 12 утверждённых укладок.'])
