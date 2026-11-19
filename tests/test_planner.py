@@ -77,6 +77,37 @@ class PlannerTests(unittest.TestCase):
     def test_complex_and_odd_capacity_block(self):
         p=run([row(1,'A',26),row(2,'B',26)],[cat('A','split',3),cat('B',needsReview=True)])
         self.assertEqual(len(p['issues']),2);self.assertFalse(p['trucks'])
+    def test_rack_matching_converts_units_reorders_dimensions_and_keeps_shelf_count(self):
+        catalog=[
+            cat('Стеллаж MS 185/100х50/4',cap=20),
+            cat('Стеллаж MS 185/100х50/5',cap=15),
+            cat('Стеллаж MS Str 185/100х50/4 Комус',cap=10),
+            cat('Стеллаж медицинский СТМ MS 185/100х50/4',cap=9),
+        ]
+        orders=[
+            row(1,'Стеллаж металлический ПРАКТИК MS 4 полки 1000×500×1850',260),
+            row(2,r'Стеллаж MS 185х100х50\5',195),
+        ]
+        plan=run(orders,catalog)
+        self.assertEqual(len(plan['trucks']),1)
+        self.assertEqual({p['rowId']:p['capacity'] for p in plan['trucks'][0]['pallets']},
+                         {'1':20,'2':15})
+        duplicate=cat('Стеллаж MS 100×50×185 см 4 полки',cap=20)
+        self.assertIn('несколько стеллажей',run([orders[0]],catalog+[duplicate])['issues'][0]['reason'])
+        self.assertTrue(run([row(3,'Стеллаж MS 1000×500×1850',520)],catalog)['issues'])
+    def test_rack_matching_preserves_strong_and_kd_variants(self):
+        catalog=[
+            cat('Стеллаж MS Str 200/100х50/6 Комус',cap=20),
+            cat('Стеллаж SBL 180KD/90x40/5',cap=38),
+        ]
+        orders=[
+            row(1,'Стеллаж металлический MS Strong 200/100x50/6 полок',260),
+            row(2,'Стеллаж металлический SBL 180KD/90x40/ 5 полок',494),
+        ]
+        plan=run(orders,catalog)
+        self.assertEqual(len(plan['trucks']),1)
+        self.assertFalse(plan['issues'])
+        self.assertTrue(run([row(2,'Стеллаж SBL 180/90x40/5',494)],catalog)['issues'])
     def test_loose_requires_fixation_and_full_truck(self):
         p=run([row(1,'A',26),row(2,'B',50)],[cat('A'),cat('B','loose',10,fixation='В закреплённом коробе')])
         self.assertEqual(sum(x['qty'] for x in p['trucks'][0]['loose']),50)

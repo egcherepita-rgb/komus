@@ -46,6 +46,9 @@ def article_candidates(product, candidates):
 
 def different_product_model(left, right):
     """Compare whole model codes, including terminal letters, before comparing digits."""
+    first_rack, second_rack = rack_signature(left or ''), rack_signature(right or '')
+    if first_rack and second_rack:
+        return first_rack != second_rack
     def signature(value):
         value = without_komus_prefix(value).upper().translate(str.maketrans('АВСЕНКМОРТХ–—−', 'ABCEHKMOPTX---'))
         models = re.findall(r'(?<![A-ZА-Я0-9])[A-Z]+(?:/[A-Z]+)?[ -]?\d+[A-Z]*(?:-\d+[A-Z]*)*', value)
@@ -97,6 +100,53 @@ def same_tula_model(left, right):
             and (not size or not other_size or size == other_size)
             and (not sections or not other_sections or sections == other_sections))
 
+# Tula uses height/width x depth/shelves. Orders also use three dimensions
+# separated by × and a separate shelf count, often in another dimension order.
+RACK_SIZE = re.compile(
+    r'(?<!\w)(\d{2,4})\s*(KD|КД)?\s*(?:[X×*/\\])\s*'
+    r'(\d{2,4})\s*(?:[X×*/\\])\s*(\d{2,4})(?!\w)'
+)
+RACK_SERIES = re.compile(r'\b(COBALT\s+SHELF\s+MS|MS(?:\s+(?:STRONG|STR|PRO|HARD|STANDART|STANDARD|CТАНДАРТ|U))?|SBL|SBE|SB|ES)\b')
+RACK_SHELVES = re.compile(r'\b(\d+)\s*ПОЛ(?:ОК|К[А-Я]*)\b')
+
+@lru_cache(maxsize=8192)
+def rack_signature(name):
+    original = without_komus_prefix(name).upper().strip()
+    category = re.match(r'СТЕЛЛАЖ\b', original)
+    if not category:
+        return None
+    original = original[category.end():]
+    title = original.translate(str.maketrans('МСХ', 'MCX'))
+    series = RACK_SERIES.search(title)
+    sizes = list(RACK_SIZE.finditer(title))
+    if not series or len(sizes) != 1:
+        return None
+    size = sizes[0]
+    unit = re.match(r'\s*(MM|CM)\b', title[size.end():])
+    tail_start = size.end() + (unit.end() if unit else 0)
+    compact_shelves = re.match(r'\s*[/\\]\s*(\d+)\b(?:\s+ПОЛ(?:ОК|К[А-Я]*)\b)?', original[tail_start:])
+    written_counts = {int(m[1]) for m in RACK_SHELVES.finditer(original)}
+    if compact_shelves:
+        written_counts.add(int(compact_shelves[1]))
+    if len(written_counts) != 1:
+        return None
+    dimensions = tuple(sorted(int(size[i]) for i in (1, 3, 4)))
+    in_cm = unit[1] == 'CM' if unit else dimensions[-1] <= 300
+    dimensions_mm = tuple(n * 10 for n in dimensions) if in_cm else dimensions
+    family = ' '.join(series[1].split())
+    family = {'MS STR': 'MS STRONG', 'MS STANDART': 'MS', 'MS STANDARD': 'MS', 'MS CТАНДАРТ': 'MS'}.get(family, family)
+    tail_end = tail_start + (compact_shelves.end() if compact_shelves else 0)
+    if series.end() > size.start():
+        return None
+    details = original[:series.start()] + ' ' + original[series.end():size.start()] + ' ' + original[tail_end:]
+    details = RACK_SHELVES.sub(' ', details)
+    kd = bool(size[2] or re.search(r'\b(?:KD|КД)\b', details))
+    details = re.sub(r'\b(?:KD|КД)\b', ' ', details)
+    # Preserve catalogue variants such as medical/СТМ or galvanized finish.
+    details = re.sub(r'\b(?:МЕТАЛЛИЧЕСКИЙ|ПРАКТИК|КОМУС)\b', ' ', details)
+    qualifiers = normalize(details)
+    return family, dimensions_mm, next(iter(written_counts)), kd, qualifiers
+
 def resolve_catalog_product(product, catalog):
     candidates, matched_article = article_candidates(product, catalog)
     if matched_article:
@@ -112,6 +162,15 @@ def resolve_catalog_product(product, catalog):
             return matches[0]
         if matches:
             raise ValueError('В справочнике Тула несколько строк с таким названием. Укажите артикул.')
+    for name in names:
+        rack = rack_signature(name or '')
+        if not rack:
+            continue
+        matches = [row for row in candidates if rack == rack_signature(row.get('name') or '')]
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            raise ValueError('В справочнике Тула несколько стеллажей с такой серией, размерами и числом полок. Укажите артикул.')
     for name in names:
         model = tula_model(name or '')
         if not model:
