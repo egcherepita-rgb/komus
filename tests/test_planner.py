@@ -119,6 +119,19 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(len(plan['trucks']),1)
         self.assertFalse(plan['issues'])
         self.assertTrue(run([row(2,'Стеллаж SBL 180/90x40/5',494)],catalog)['issues'])
+    def test_cobalt_kd_uses_confirmed_nominal_heights_but_keeps_other_dimensions(self):
+        catalog=[
+            cat('Стеллаж Cobalt Shelf MS 180KD/100x30/4','split',60),
+            cat('Стеллаж Cobalt Shelf MS 200KD/100x50/5','split',50),
+        ]
+        source='Стеллаж металлический Cobalt Shelf MS KD 1000x300х1750/4 полки'
+        alternate='Стеллаж металлический Cobalt Shelf MS KD 1000x500х1950/5 полок'
+        self.assertIs(resolve_catalog_product({'name':source},catalog),catalog[0])
+        self.assertIs(resolve_catalog_product({'name':alternate},catalog),catalog[1])
+        for changed in (source.replace('1750','1760'),source.replace('300','400'),
+                        source.replace('Cobalt Shelf ',''),source.replace(' KD','')):
+            with self.assertRaises(ValueError):
+                resolve_catalog_product({'name':changed},catalog)
     def test_loose_requires_fixation_and_full_truck(self):
         p=run([row(1,'A',26),row(2,'B',50)],[cat('A'),cat('B','loose',10,fixation='В закреплённом коробе')])
         self.assertEqual(sum(x['qty'] for x in p['trucks'][0]['loose']),50)

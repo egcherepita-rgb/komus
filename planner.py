@@ -161,6 +161,11 @@ def rack_signature(name):
     details = original[:series.start()] + ' ' + original[series.end():size.start()] + ' ' + original[tail_end:]
     details = RACK_SHELVES.sub(' ', details)
     kd = bool(size[2] or re.search(r'\b(?:KD|КД)\b', details))
+    if family == 'COBALT SHELF MS' and kd:
+        # Komus uses the actual height; Tula labels these two KD models nominally.
+        nominal_height = {1750: 1800, 1950: 2000}.get(dimensions_mm[-1])
+        if nominal_height:
+            dimensions_mm = (*dimensions_mm[:-1], nominal_height)
     details = re.sub(r'\b(?:KD|КД)\b', ' ', details)
     # Preserve catalogue variants such as medical/СТМ or galvanized finish.
     details = re.sub(r'\b(?:МЕТАЛЛИЧЕСКИЙ|ПРАКТИК|КОМУС)\b', ' ', details)
