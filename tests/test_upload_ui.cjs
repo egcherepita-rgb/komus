@@ -7,7 +7,7 @@ const path = require('node:path');
 // Execute the real client handlers with an isolated DOM/API adapter.
 // No browser session, customer workbook, or production data is involved.
 function client({ upload = true } = {}) {
-  const elements = new Map(), calls = [], replies = [];
+  const elements = new Map(), events = new Map(), calls = [], replies = [];
   const element = id => {
     if (!elements.has(id)) elements.set(id, {
       value: '', files: [], hidden: false, disabled: false, open: false,
@@ -21,7 +21,7 @@ function client({ upload = true } = {}) {
     URLSearchParams, Intl, Date, console,
     location: { pathname: '/' }, localStorage: { getItem() { return null; } },
     document: {
-      getElementById: element, addEventListener() {},
+      getElementById: element, addEventListener(type, listener) { events.set(type, listener); },
       querySelectorAll: selector => selector === '.mutation' ? [element('applyImport'), element('previewButton')] : [],
       body: { classList: { add() {} } },
     },
@@ -38,6 +38,7 @@ function client({ upload = true } = {}) {
   element('uploadFile').files = [{ name: 'initial.xlsx', size: 100 }];
   element('uploadYear').value = '2026'; element('initialMode').value = 'full';
   return { element, calls, replies, run: code => vm.runInContext(code, context),
+    click: dataset => events.get('click')({ target: { closest: () => ({ dataset }) } }),
     check: () => vm.runInContext("$('uploadForm').onsubmit({preventDefault(){}})", context) };
 }
 const good = () => ({ token: 'reviewed-token', count: 1, errors: [], warnings: [], rows: [
@@ -119,6 +120,26 @@ test('manual shipment uses the quantity for this shipment and confirms before sa
   assert.equal(c.calls[0].url, '/api/v2/row-transition');
   assert.deepEqual(JSON.parse(c.calls[0].options.body), {
     id: 'row1', revision: 4, operation: 'ship', quantity: 10, actualDate: '2026-11-17',
+  });
+  assert.equal(c.element('rowTransitionDialog').open, false);
+});
+
+test('an active reservation can be removed from the order row without entering a quantity', async () => {
+  const c = client({ upload: false });
+  c.run("state={rows:[{id:'row1',order:'QA-1',name:'Товар',qty:50,shipped:10,reserved:20}],plan:{id:'plan-A'}}; revision=4; render=()=>{}");
+  assert.match(c.run('orderRowActions(state.rows[0])'), /data-release-row="row1">Снять отметку/);
+  assert.doesNotMatch(c.run('orderRowActions({...state.rows[0],reserved:0})'), /data-release-row/);
+  c.click({ releaseRow: 'row1' });
+  assert.equal(c.element('rowTransitionDialog').open, true);
+  assert.equal(c.element('rowTransitionQuantityLabel').hidden, true);
+  assert.equal(c.element('rowTransitionDateLabel').hidden, true);
+  assert.match(c.element('rowTransitionHint').textContent, /вернутся 20 шт/);
+  assert.equal(c.calls.length, 0);
+  c.replies.push({ revision: 5, state: { plan: null }, result: {} });
+  await c.run("$('rowTransitionForm').onsubmit({preventDefault(){}})");
+  assert.equal(c.calls[0].url, '/api/v2/row-transition');
+  assert.deepEqual(JSON.parse(c.calls[0].options.body), {
+    id: 'row1', revision: 4, operation: 'reserve', quantity: 0,
   });
   assert.equal(c.element('rowTransitionDialog').open, false);
 });

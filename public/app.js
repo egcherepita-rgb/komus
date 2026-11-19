@@ -66,9 +66,11 @@ function orderRowActions(row){
  const edit=`<button class="compact-action mutation" data-edit-row="${id}">Проверить / исправить</button>`;
  if(readOnly)return edit;
  if(row.shipped===row.qty)return '<span class="tag">Отгружено</span>'+edit;
+ const release=row.reserved? `<button class="compact-action mutation" data-release-row="${id}">Снять отметку</button>`:'';
  return `<div class="actions">
   <button class="compact-action mutation" data-ship-row="${id}">Отгружено</button>
-  <button class="compact-action mutation" data-reserve-row="${id}">В готовой машине</button>
+  <button class="compact-action mutation" data-reserve-row="${id}">${row.reserved?'Изменить количество в машине':'В готовой машине'}</button>
+  ${release}
   ${edit}
  </div>`;
 }
@@ -156,24 +158,30 @@ function openRowTransition(id,operation){
  const remaining=row.qty-row.shipped;
  if(remaining<=0)return;
  const isShipment=operation==='ship';
+ const isRelease=operation==='release';
+ if(isRelease&&!row.reserved)return;
  rowTransition={id,operation,revision};
- $('rowTransitionTitle').textContent=isShipment?'Отметить отгрузку':'Товар в готовой машине';
+ $('rowTransitionTitle').textContent=isRelease?'Снять отметку «В готовой машине»':isShipment?'Отметить отгрузку':'Товар в готовой машине';
  $('rowTransitionDescription').textContent=`Заказ ${row.order} · ${row.name}. Остаток: ${fmt(remaining)} шт.`+
   (row.reserved?` В готовой машине: ${fmt(row.reserved)} шт.`:'');
  $('rowTransitionQtyLabel').textContent=isShipment?'Отправлено сейчас, шт.':'Всего в готовой машине, шт.';
  const quantity=$('rowTransitionQty');
+ $('rowTransitionQuantityLabel').hidden=isRelease;
+ quantity.required=!isRelease;
  quantity.min=isShipment?'1':'0';
  quantity.max=remaining;
- quantity.value=row.reserved||remaining;
+ quantity.value=isRelease?0:row.reserved||remaining;
  $('rowTransitionDateLabel').hidden=!isShipment;
  $('rowTransitionDate').required=isShipment;
  $('rowTransitionDate').value=today();
  $('rowTransitionDate').max=today();
- $('rowTransitionHint').textContent=isShipment
+ $('rowTransitionHint').textContent=isRelease
+  ? `В расчёт вернутся ${fmt(row.reserved)} шт. по этой позиции. Фактические отгрузки сохранятся.`
+  : isShipment
   ? 'Укажите количество за эту отправку. Если товар был в готовой машине, приложение сначала спишет его оттуда.'
   : 'Это количество исключается из сборки новых машин. Введите 0, чтобы вернуть товар в расчёт.';
  if(state.plan)$('rowTransitionHint').textContent+=' После сохранения изменения соберите план машин заново.';
- $('saveRowTransition').textContent=isShipment?'Подтвердить отгрузку':'Сохранить количество';
+ $('saveRowTransition').textContent=isRelease?'Снять отметку':isShipment?'Подтвердить отгрузку':'Сохранить количество';
  $('rowTransitionError').textContent='';
  $('rowTransitionDialog').showModal();
 }
@@ -185,7 +193,9 @@ $('rowTransitionForm').onsubmit=async event=>{
   return;
  }
  const {id,operation}=rowTransition;
- const data={id,operation,quantity:Number($('rowTransitionQty').value)};
+ const data=operation==='release'
+  ? {id,operation:'reserve',quantity:0}
+  : {id,operation,quantity:Number($('rowTransitionQty').value)};
  if(operation==='ship')data.actualDate=$('rowTransitionDate').value;
  try{
   if(await action('row-transition',data))$('rowTransitionDialog').close();
@@ -211,6 +221,7 @@ document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b||
  if(b.dataset.tab)tab(b.dataset.tab);if(b.dataset.close)$(b.dataset.close).close();if(b.dataset.download)download(b.dataset.download);if(b.dataset.import)showUpload(b.dataset.import);if(b.dataset.editRow)editRow(b.dataset.editRow);if(b.dataset.editCatalog!==undefined)editCatalog(Number(b.dataset.editCatalog));
  if(b.dataset.shipRow)openRowTransition(b.dataset.shipRow,'ship');
  if(b.dataset.reserveRow)openRowTransition(b.dataset.reserveRow,'reserve');
+ if(b.dataset.releaseRow)openRowTransition(b.dataset.releaseRow,'release');
  if(b.dataset.dispatch){dispatching=Number(b.dataset.dispatch);const t=state.plan.trucks.find(t=>t.id===dispatching);$('dispatchDescription').textContent=`Машина № ${t.id}: ${fmt(sumTruck(t))} шт., ${summary(t).length} позиций. Плановая дата ${datefmt(t.date)}.`;$('actualDate').value=today();$('actualDate').max=today();$('dispatchError').textContent='';$('dispatchDialog').showModal();}
  if(b.dataset.calendar||b.dataset.historyCard){const hist=!!b.dataset.historyCard,t=hist?state.shipments.find(t=>t.shipmentId===b.dataset.historyCard):state.plan.trucks.find(t=>t.id===Number(b.dataset.calendar));$('calendarDetails').innerHTML=truckHtml(t,hist);sizes();lock(busy);$('calendarDetails').scrollIntoView({behavior:'smooth',block:'start'});}
  if(b.dataset.pallet!==undefined){const t=b.dataset.shipment?state.shipments.find(t=>t.shipmentId===b.dataset.shipment):state.plan.trucks.find(t=>t.id===Number(b.dataset.truck));const p=t.pallets[Number(b.dataset.pallet)];$('palletDetail').innerHTML=`<span class="eyebrow">МАШИНА № ${t.id} · МЕСТО ${Number(b.dataset.pallet)+1}</span><h2>${esc(p.name)}</h2><p><strong>${fmt(p.qty)} шт.</strong>${p.vertical?' · ВП':''}</p><p>Заказ: ${esc(p.order)}<br>Счёт: ${esc(p.invoice)}<br>Артикул: ${esc(p.sku||p.komusSku||'—')}</p><p>Готовность: ${datefmt(p.ready)}<br>Отгрузить до: ${datefmt(p.due)}</p>${p.partial?'<p class="tag amber">Паллета заполнена частично, занимает целое место.</p>':''}`;$('palletDialog').showModal();}
