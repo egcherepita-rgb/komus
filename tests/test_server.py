@@ -85,6 +85,38 @@ class ServerTests(unittest.TestCase):
         self.assertIn('Нет однозначного совпадения',result['rows'][5]['error'])
         self.assertIn('целое число',result['rows'][6]['error'])
         self.assertEqual(json.load(self.request(client,'/api/v2/state')),before)
+    def test_moscow_catalog_import_and_order_template_pallet_check(self):
+        client = self.client()
+        state = server.demo()
+        ledger_store.mutate(server.DATA,0,lambda current:current.update(state))
+        before = json.load(self.request(client,'/api/v2/state'))
+        book = Workbook()
+        sheet = book.active
+        sheet.append([None,None,'ТУЛА',None,None,'МОСКВА'])
+        sheet.append([None,'ВП','Наименование Промет','Крат-ность',None,'Наименование Промет','Крат-ность','Артикул Комуса'])
+        sheet.append([1,None,'Демонстрационный шкаф',20,None,'Ключница KEY-40',20,1234])
+        raw = BytesIO()
+        book.save(raw)
+        preview = json.load(self.request(client,'/api/v2/import-preview?kind=moscow',raw.getvalue(),raw=True))
+        applied = json.load(self.request(client,'/api/v2/import-apply',{'token':preview['token'],'revision':before['revision']}))
+        self.assertEqual(applied['state']['plan'],before['state']['plan'])
+        self.assertEqual(applied['state']['catalog'],before['state']['catalog'])
+        self.assertEqual(applied['state']['moscowCatalog'],[{'name':'Ключница KEY-40','original':'20','komusSku':'1234'}])
+
+        book = load_workbook(BytesIO(template_file('order')))
+        book.active.append(['К-1','С-1',1234,None,'Название из заказа',20,None,None])
+        book.active.append(['К-1','С-1',None,None,'Шкаф для ключей AIKO KEY-40 на 40 ключей',20,None,None])
+        book.active.append(['К-1','С-1',None,None,'Демонстрационный шкаф',40,None,None])
+        raw = BytesIO()
+        book.save(raw)
+        checked = json.load(self.request(client,'/api/v2/pallets',raw.getvalue(),raw=True))
+        first, second, third = checked['rows']
+        self.assertEqual([r['warehouse'] for r in (first,second,third)],['МСК','МСК','Тула'])
+        self.assertEqual(first['order'],'К-1')
+        self.assertNotIn('blackFull',first)
+        self.assertEqual(third['blackFull'],2)
+        self.assertEqual(json.load(self.request(client,'/api/v2/state')), {
+            'revision':applied['revision'],'state':applied['state'],'result':None})
     def test_bulk_request_contains_all_open_orders_and_only_open_rows(self):
         c=self.client();state=wf.empty_state()
         def row(rid,order,shipped=0):

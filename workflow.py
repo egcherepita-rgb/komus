@@ -18,6 +18,7 @@ def key(order,position): return canonical_order(order)+'/'+clean(position)
 
 def empty_state():
     return {'schema':2,'rows':[],'catalog':[],'bootstrap':None,'catalogUpdated':None,
+            'moscowCatalog':[],'moscowCatalogUpdated':None,
             'imports':[],'shipments':[],'plan':None,'reconciled':False,
             'settings':{'start':today(),'strategy':'urgent'}}
 
@@ -109,6 +110,10 @@ def apply_import(state,kind,parsed,meta):
         state['rows'].extend(deepcopy(incoming))
     elif kind=='catalog':
         state['catalog']=deepcopy(parsed['catalog']);state['catalogUpdated']=now()
+        if 'moscowCatalog' in parsed:
+            state['moscowCatalog']=deepcopy(parsed['moscowCatalog']);state['moscowCatalogUpdated']=now()
+    elif kind=='moscow':
+        state['moscowCatalog']=deepcopy(parsed['moscowCatalog']);state['moscowCatalogUpdated']=now()
     elif kind=='response':
         index={r['id']:r for r in state['rows']}; changes=parsed['changes']
         for change in changes:
@@ -132,7 +137,7 @@ def apply_import(state,kind,parsed,meta):
     else:raise ValueError('Неизвестный тип загрузки')
     if len(state['rows'])>5000:raise ValueError('В журнале не может быть более 5000 позиций')
     state['imports'].append(dict(meta,kind=kind,lines=parsed.get('count',len(parsed.get('rows',parsed.get('catalog',[]))))))
-    state['plan']=None
+    if kind!='moscow':state['plan']=None
     return {'duplicate':False,'message':'Данные загружены и сохранены на сервере.'}
 
 def update_row(state,rid,changes):

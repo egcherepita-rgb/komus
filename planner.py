@@ -173,13 +173,13 @@ def rack_signature(name):
     qualifiers = normalize(details)
     return family, dimensions_mm, next(iter(written_counts)), kd, qualifiers
 
-def resolve_catalog_product(product, catalog):
+def resolve_catalog_product(product, catalog, label='Тула', extra_model=None):
     candidates, matched_article = article_candidates(product, catalog)
     if matched_article:
         if len(candidates) == 1:
             return candidates[0]
         reason = 'Артикулы расходятся' if not candidates else 'Артикул соответствует нескольким строкам'
-        raise ValueError(f'{reason} в справочнике Тула. Проверьте артикулы Комуса и ПРОМЕТ.')
+        raise ValueError(f'{reason} в справочнике {label}. Проверьте артикулы Комуса и ПРОМЕТ.')
     names = (product.get('prometName'), product.get('name'))
     for name in names:
         key = product_name_key(name)
@@ -187,7 +187,7 @@ def resolve_catalog_product(product, catalog):
         if len(matches) == 1:
             return matches[0]
         if matches:
-            raise ValueError('В справочнике Тула несколько строк с таким названием. Укажите артикул.')
+            raise ValueError(f'В справочнике {label} несколько строк с таким названием. Укажите артикул.')
     for name in names:
         rack = rack_signature(name or '')
         if not rack:
@@ -196,7 +196,7 @@ def resolve_catalog_product(product, catalog):
         if len(matches) == 1:
             return matches[0]
         if matches:
-            raise ValueError('В справочнике Тула несколько стеллажей с такой серией, размерами и числом полок. Укажите артикул.')
+            raise ValueError(f'В справочнике {label} несколько стеллажей с такой серией, размерами и числом полок. Укажите артикул.')
     for name in names:
         model = tula_model(name or '')
         if not model:
@@ -205,8 +205,13 @@ def resolve_catalog_product(product, catalog):
         if len(matches) == 1:
             return matches[0]
         if matches:
-            break
-    raise ValueError('Нет однозначного совпадения в справочнике Тула. Проверьте артикулы или полную модель товара.')
+            raise ValueError(f'Нет однозначного совпадения в справочнике {label}. Проверьте артикулы или полную модель товара.')
+    if extra_model:
+        model = extra_model(product.get('name') or '')
+        matches = [row for row in candidates if model and model == extra_model(row['name'])]
+        if len(matches) == 1:
+            return matches[0]
+    raise ValueError(f'Нет однозначного совпадения в справочнике {label}. Проверьте артикулы или полную модель товара.')
 
 def workdays(a,b):
     """Weekdays after a through b, without a public-holiday calendar."""

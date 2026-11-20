@@ -112,6 +112,7 @@ test('pallet calculator uploads a workbook and renders calculations and unmatche
   c.replies.push({ sheet: 'Паллеты', rows: [
     { line: 2, name: 'Шкаф', quantity: 67, capacity: 22, redFull: 1, blackFull: 0, redHalf: 1, remainder: 1 },
     { line: 3, name: 'Другая позиция', quantity: 1, error: 'Нет в справочнике' },
+    { line: 4, name: 'Ключница', quantity: 20, order: 'К-1', warehouse: 'МСК' },
   ] });
   await c.run("$('palletsForm').onsubmit({preventDefault(){}})");
   assert.equal(c.calls[0].url, '/api/v2/pallets');
@@ -119,7 +120,24 @@ test('pallet calculator uploads a workbook and renders calculations and unmatche
   assert.equal(c.element('palletsResults').hidden, false);
   assert.match(c.element('palletsResults').innerHTML, /Красная 0,5/);
   assert.match(c.element('palletsResults').innerHTML, /Нет в справочнике/);
-  assert.match(c.element('palletsStatus').textContent, /Рассчитано 1 из 2/);
+  assert.match(c.element('palletsResults').innerHTML, /<span class="tag purple">МСК<\/span>/);
+  assert.match(c.element('palletsStatus').textContent, /Рассчитано 1 из 3 позиций. МСК: 1/);
+});
+
+test('history groups manual shipments by date and displays known trucks separately', () => {
+  const c = client({ upload: false });
+  c.run(`state={shipments:[{id:3,actualDate:'2026-11-19',slot:1,layout:{id:1,doubles:0,singles:0,length:0},pallets:[],loose:[]}],manualShipments:[
+    {rowId:'one',order:'11',name:'Товар один',qty:5,actualDate:'2026-11-19'},
+    {rowId:'one',order:'11',name:'Товар один',qty:7,actualDate:'2026-11-19'},
+    {rowId:'two',order:'12',name:'Товар два',qty:2,actualDate:'2026-11-19'},
+    {rowId:'one',order:'11',name:'Товар один',qty:3,actualDate:'2026-11-18'},
+  ]}; renderHistory()`);
+  const html = c.element('shipments').innerHTML;
+  assert.equal((html.match(/Ручные отметки/g) || []).length, 2);
+  assert.match(html, /Машина № 3/);
+  assert.match(html, /2 поз. · 14 шт./);
+  assert.match(html, /<strong>12 шт.<\/strong>/);
+  assert.ok(html.indexOf('19 ноября') < html.indexOf('18 ноября'));
 });
 
 test('manual shipment uses the quantity for this shipment and confirms before saving', async () => {

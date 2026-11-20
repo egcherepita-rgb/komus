@@ -5,7 +5,7 @@ const datefmt=v=>v?new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'long',y
 const fmt=n=>Number(n||0).toLocaleString('ru-RU');
 const readOnly=location.pathname==='/demo';
 const types={single:'Красная 0,5',double:'Чёрная 1',split:'Красная 1',loose:'0 · без места'};
-const importNames={initial:'Первоначальный файл отгрузок',catalog:'Кратность Тула',order:'Новый заказ Комуса',response:'Ответ Донцовой'};
+const importNames={initial:'Первоначальный файл отгрузок',catalog:'Кратность Тула',moscow:'Кратность Москвы',order:'Новый заказ Комуса',response:'Ответ Донцовой'};
 let state=null,revision=0,busy=false,month=today().slice(0,7),uploadKind='',uploadToken=null,uploadGeneration=0,editing=null,dispatching=null;
 let layouts=[],layoutsLoading=null;
 let rowTransition=null,planToClear=null;
@@ -27,16 +27,19 @@ function tab(name){document.querySelectorAll('section[id^="view-"]').forEach(s=>
 function table(headers,rows,empty='Пока нет данных'){return `<table><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.length?rows.map(r=>'<tr>'+r.map(c=>'<td>'+c+'</td>').join('')+'</tr>').join(''):`<tr><td colspan="${headers.length}">${esc(empty)}</td></tr>`}</tbody></table>`;}
 function download(path){if(readOnly){banner('Войдите в приложение, чтобы скачать рабочий шаблон.');return;}const a=document.createElement('a');a.href=path;a.download='';document.body.append(a);a.click();a.remove();}
 function renderPalletCalculation(result){
- const cols=['Строка Excel','Товар','Количество, шт.','Шт. в паллете','Красная 1','Чёрная 1','Красная 0,5','Остаток, шт.','Примечание'];
+ const cols=['Строка Excel','Заказ','Товар','Склад','Количество, шт.','Шт. в паллете','Красная 1','Чёрная 1','Красная 0,5','Остаток, шт.','Примечание'];
  const values=result.rows.map(r=>[
-  fmt(r.line),esc(r.name),esc(r.quantity),r.capacity?fmt(r.capacity):'—',
-  ...['redFull','blackFull','redHalf','remainder'].map(key=>r.error?'—':fmt(r[key])),
+  fmt(r.line),esc(r.order||'—'),esc(r.name),r.warehouse==='МСК'?'<span class="tag purple">МСК</span>':esc(r.warehouse||'—'),
+  esc(r.quantity),r.capacity?fmt(r.capacity):'—',
+  ...['redFull','blackFull','redHalf','remainder'].map(key=>r.error||r.warehouse==='МСК'?'—':fmt(r[key])),
   r.error?`<span class="tag amber">${esc(r.error)}</span>`:esc(r.note||'')
  ]);
  const errors=result.rows.filter(r=>r.error).length;
+ const moscow=result.rows.filter(r=>r.warehouse==='МСК').length;
  $('palletsResults').innerHTML=table(cols,values);
  $('palletsResults').hidden=false;
- $('palletsStatus').textContent=`Лист «${result.sheet}». Рассчитано ${result.rows.length-errors} из ${result.rows.length} позиций.`+
+ $('palletsStatus').textContent=`Лист «${result.sheet}». Рассчитано ${result.rows.length-errors-moscow} из ${result.rows.length} позиций.`+
+  (moscow?` МСК: ${moscow}.`:'')+
   (errors?` Требуют проверки: ${errors}.`:'');
 }
 $('palletsFile').onchange=()=>{
@@ -111,22 +114,56 @@ function catalogCapacity(item){
  if(item.needsReview)return '—';
  return String(item.type==='split'?item.capacity/2:item.capacity);
 }
-function renderCatalog(){const q=$('catalogSearch').value.toLowerCase();$('catalogMeta').textContent=state.catalog.length?`В журнале ${state.catalog.length} товаров. Последнее обновление: ${datefmt(state.catalogUpdated)}. Перезагружать при каждом входе не нужно.`:'Загрузите справочник Тула один раз. Затем обновляйте только по мере изменений.';
- $('catalogTable').innerHTML=table(['Товар','Тип','Шт. на паллете или в партии','ВП','Проверка','Крепление для 0','Действие'],state.catalog.map((r,i)=>({...r,i})).filter(r=>r.name.toLowerCase().includes(q)).map(r=>[esc(r.name),esc(types[r.type]),catalogCapacity(r),r.vertical?'ВП':'—',r.needsReview?`<span class="tag amber">Проверить: ${esc(r.original||'кратность')}</span>`:'—',esc(r.fixation||''),`<button class="compact-action mutation" data-edit-catalog="${r.i}">Исправить</button>`]));if(readOnly)lock(false);}
+function renderCatalog(){
+ const q=$('catalogSearch').value.toLowerCase(),moscow=state.moscowCatalog||[];
+ const matches=r=>[r.name,r.sku,r.komusSku].join(' ').toLowerCase().includes(q);
+ $('catalogMeta').textContent=`Тула: ${fmt(state.catalog.length)} поз.`+
+  (state.catalogUpdated?` · ${datefmt(state.catalogUpdated)}`:'')+
+  ` | Москва: ${fmt(moscow.length)} поз.`+
+  (state.moscowCatalogUpdated?` · ${datefmt(state.moscowCatalogUpdated)}`:'');
+ $('catalogTable').innerHTML='<div class="panel-heading"><h2>Тула</h2></div>'+table(
+  ['Товар','Тип','Шт. на паллете или в партии','ВП','Проверка','Крепление для 0','Действие'],
+  state.catalog.map((r,i)=>({...r,i})).filter(matches).map(r=>[esc(r.name),esc(types[r.type]),catalogCapacity(r),r.vertical?'ВП':'—',r.needsReview?`<span class="tag amber">Проверить: ${esc(r.original||'кратность')}</span>`:'—',esc(r.fixation||''),`<button class="compact-action mutation" data-edit-catalog="${r.i}">Исправить</button>`]));
+ $('moscowCatalogTable').innerHTML=table(['Товар','Артикул Комуса','Артикул ПРОМЕТ','Кратность'],moscow.filter(matches).map(r=>
+  [esc(r.name),esc(r.komusSku||'—'),esc(r.sku||'—'),esc(r.original||'—')]),
+  moscow.length?'По запросу ничего не найдено.':'Загрузите справочник Москвы.');
+ if(readOnly)lock(false);
+}
 function renderInitial(){const b=state.bootstrap;const started=!!b||!!state.rows.length;$('initialPanel').innerHTML=started?`<h2>Первоначальные данные уже сохранены</h2><span class="tag">Журнал ведётся на сервере</span><p>${esc(b?.filename||'Журнал начат с новых заказов')}${b?.at?' · '+datefmt(b.at):''}</p><p>Повторно загружать весь файл не нужно. Новые заказы добавляйте в «Заказы Комуса», готовность — в «Ответы Донцовой». Отправленные машины отмечайте в плане.</p>${b?.sha?`<button data-download="/api/v2/source?sha=${esc(b.sha)}">Скачать первоначальный файл</button>`:''}`:`<h2>Загрузите действующий файл отгрузок Комуса</h2><p>Выберите актуальный лист и укажите, содержатся ли в нём исходные количества или уже чистые остатки. После проверки файл и строки останутся на сервере.</p><button class="primary mutation" data-import="initial">Загрузить первоначальный файл</button>`;$('importFiles').innerHTML=fileTable(state.imports);}
+function manualTruckHtml(entries){
+ const groups=new Map();
+ for(const entry of entries){
+  const key=JSON.stringify([entry.rowId,entry.order,entry.invoice,entry.name]);
+  const row=groups.get(key)||{...entry,qty:0};
+  row.qty+=entry.qty;
+  groups.set(key,row);
+ }
+ const total=entries.reduce((sum,entry)=>sum+entry.qty,0);
+ const rows=[...groups.values()].map(entry=>[esc(entry.order),esc(entry.invoice),esc(entry.name),`<strong>${fmt(entry.qty)} шт.</strong>`]);
+ return `<article class="panel truck shipment"><div class="truck-top"><div class="truck-name"><h3>Машина <span class="tag">Ручные отметки</span></h3></div></div>
+  <details open><summary>Состав · ${groups.size} поз. · ${fmt(total)} шт.</summary><div class="table-wrap">${table(['Заказ','Счёт','Товар','Отгружено'],rows)}</div></details></article>`;
+}
 function renderHistory(){
- const manual=(state.manualShipments||[]).slice().reverse();
- $('manualShipmentHistory').hidden=!manual.length;
- if(manual.length)$('manualShipmentHistory').innerHTML='<div class="panel-heading"><h2>Отгрузки по позициям</h2></div>'+
-  table(['Дата','Заказ','Счёт','Товар','Отгружено, шт.'],manual.map(entry=>[
-   datefmt(entry.actualDate),esc(entry.order),esc(entry.invoice),esc(entry.name),fmt(entry.qty)
-  ]));
- $('shipments').innerHTML=state.shipments.slice().reverse().map(t=>truckHtml(t,true)).join('')||'<div class="panel help"><h2>В истории пока нет отгруженных машин</h2><p>Состав машины появится здесь после отметки об отправке в плане.</p></div>';}
+ const days=new Map();
+ for(const [kind,entries] of [['trucks',state.shipments],['manual',state.manualShipments||[]]]){
+  for(const entry of entries){
+   const day=days.get(entry.actualDate)||{trucks:[],manual:[]};
+   day[kind].push(entry);
+   days.set(entry.actualDate,day);
+  }
+ }
+ $('shipments').innerHTML=[...days.keys()].sort().reverse().map(date=>{
+  const {trucks,manual}=days.get(date);
+  return `<div class="result-title"><h2>${datefmt(date)}</h2></div>`+
+   trucks.sort((a,b)=>a.slot-b.slot).map(truck=>truckHtml(truck,true)).join('')+
+   (manual.length?manualTruckHtml(manual):'');
+ }).join('')||'<div class="panel help"><h2>В истории пока нет отгруженных машин</h2><p>Состав машины появится здесь после отметки об отправке.</p></div>';
+}
 function renderCalendar(){if(!state)return;const[y,m]=month.split('-').map(Number),first=new Date(y,m-1,1,12),offset=(first.getDay()+6)%7,days=new Date(y,m,0).getDate();$('monthTitle').textContent=new Intl.DateTimeFormat('ru-RU',{month:'long',year:'numeric'}).format(first);let html=['ПН','ВТ','СР','ЧТ','ПТ','СБ','ВС'].map(d=>`<div class="weekday">${d}</div>`).join('');for(let i=0;i<offset;i++)html+='<div class="calendar-day weekend"></div>';
  for(let n=1;n<=days;n++){const day=`${y}-${String(m).padStart(2,'0')}-${String(n).padStart(2,'0')}`,trucks=state.plan?.wholePalletsOnly&&state.plan.readinessMode==='position'?state.plan.trucks.filter(t=>t.date===day):[],sent=state.shipments.filter(t=>t.actualDate===day);html+=`<div class="calendar-day ${(offset+n-1)%7>4?'weekend':''} ${day===today()?'today':''}"><span class="date-num">${n}</span>${trucks.length?`<span class="tag purple">План: ${trucks.length} маш.</span>`:''}${sent.length?`<span class="tag">Отгружено: ${sent.length}</span>`:''}${trucks.map(t=>`<button class="calendar-event" data-calendar="${t.id}"><strong>Машина № ${t.id}</strong><small>${fmt(sumTruck(t))} шт. · ${summary(t).length} поз.</small><small>${summary(t).map(p=>p.order).join(', ')}</small></button>`).join('')}${sent.map(t=>`<button class="calendar-event" data-history-card="${t.shipmentId}"><strong>✓ Отгружена № ${t.id}</strong><small>${fmt(sumTruck(t))} шт.</small></button>`).join('')}</div>`;}
  for(let i=(offset+days)%7;i>0&&i<7;i++)html+='<div class="calendar-day weekend"></div>';$('calendarGrid').innerHTML=html;$('calendarCaption').textContent=state.plan?.wholePalletsOnly&&state.plan.readinessMode==='position'?'Нажмите машину, чтобы открыть состав и паллеты. Зелёным отмечены фактические отгрузки.':'План ещё не собран. После расчёта машины появятся на своих датах.';$('calendarDetails').innerHTML='';}
 function render(){if(!state)return;$('saveState').textContent=readOnly?'Демонстрация · вымышленные данные':'Все изменения сохранены · версия '+revision;renderPlan();renderOrders();renderResponses();renderCatalog();renderInitial();renderHistory();renderCalendar();sizes();lock(busy);}
-function showUpload(kind){if(readOnly)return banner('Для загрузки своих файлов войдите в приложение.');uploadKind=kind;$('uploadForm').reset();$('uploadYear').value=today().slice(0,4);$('uploadTitle').textContent=importNames[kind];$('uploadDescription').textContent={initial:'Одноразовый импорт действующего журнала. Заказы и подтверждённые даты сохранятся на сервере.',catalog:'Обновится только справочник. Заказы, история и отгрузки сохранятся.',order:'В одном файле можно загрузить несколько новых заказов. Номер заказа укажите в каждой строке. Они добавятся к общему журналу.',response:'Обновятся только подтверждения найденных позиций заказа. Заказы и сроки клиента сохранятся.'}[kind];$('initialModeBox').hidden=kind!=='initial';$('uploadSheetBox').hidden=true;$('uploadMessage').hidden=true;clearPreview('Выберите файл, заполните параметры и нажмите «Проверить файл».');$('uploadDialog').showModal();}
+function showUpload(kind){if(readOnly)return banner('Для загрузки своих файлов войдите в приложение.');uploadKind=kind;$('uploadForm').reset();$('uploadYear').value=today().slice(0,4);$('uploadTitle').textContent=importNames[kind];$('uploadDescription').textContent={initial:'Одноразовый импорт действующего журнала. Заказы и подтверждённые даты сохранятся на сервере.',catalog:'Загрузите справочник Тулы. Из общей книги с блоком «МОСКВА» загрузятся также позиции Москвы.',moscow:'Загрузите общую книгу с блоком «МОСКВА» или файл с колонками «Наименование» и «Кратность».',order:'В одном файле можно загрузить несколько новых заказов. Номер заказа укажите в каждой строке. Они добавятся к общему журналу.',response:'Обновятся только подтверждения найденных позиций заказа. Заказы и сроки клиента сохранятся.'}[kind];$('initialModeBox').hidden=kind!=='initial';$('uploadSheetBox').hidden=true;$('uploadMessage').hidden=true;clearPreview('Выберите файл, заполните параметры и нажмите «Проверить файл».');$('uploadDialog').showModal();}
 function clearPreview(message='Параметры изменены. Нажмите «Проверить файл».'){
  uploadGeneration++;uploadToken=null;$('applyImport').disabled=true;$('uploadPreview').innerHTML='';$('uploadStatus').textContent=message;
 }
@@ -159,8 +196,9 @@ async function previewFile(){
  const errors=r.errors||[];
  if(!errors.length&&(!r.count||!r.token))throw Error('Не найдено заполненных строк для сохранения. Проверьте выбранный лист.');
  $('uploadMessage').classList.toggle('error',!!errors.length);
- $('uploadMessage').textContent=`Лист: ${params.get('sheet')||'Справочник Тула'}. Проверено позиций: ${r.count}. Ошибок: ${errors.length}.\n`+(r.warnings||[]).join('\n');
+ $('uploadMessage').textContent=`Лист: ${params.get('sheet')||importNames[uploadKind]}. Проверено позиций: ${r.count}. Ошибок: ${errors.length}.\n`+(r.warnings||[]).join('\n');
  let grid='';if(uploadKind==='catalog')grid=table(['Товар','Тип','Шт. на паллете или в партии','Проверка'],r.catalog.map(x=>[esc(x.name),esc(types[x.type]),catalogCapacity(x),x.needsReview?'Нужно уточнить':'—']));
+ else if(uploadKind==='moscow')grid=table(['Товар','Кратность'],r.moscowCatalog.map(x=>[esc(x.name),esc(x.original||'—')]));
  else if(uploadKind==='response')grid=table(['Заказ','Счёт','Товар','Дата готовности всей позиции','Дата ответа'],r.changes.map(x=>[esc(x.order),esc(x.invoice),esc(x.name),x.ready?datefmt(x.ready):'Снять прежнюю дату готовности',datefmt(x.asOf)]));
  else grid=table(['Заказ','Счёт','Товар','Количество','Отгружено','Срок'],r.rows.map(x=>[esc(x.order),esc(x.invoice),esc(x.name),fmt(x.qty),fmt(x.shipped),datefmt(x.due)]));
  $('uploadPreview').innerHTML=(errors.length?`<div class="preview-errors"><strong>Сохранение заблокировано: исправьте ${errors.length} ошибок в файле.</strong><br>${errors.map(e=>'Строка '+esc(e.line)+': '+esc(e.reason)).join('<br>')}</div>`:'')+grid;

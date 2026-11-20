@@ -6,9 +6,29 @@ from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.styles.colors import COLOR_INDEX
 from planner import (LIMITER_PLACEMENT, apply_two_pallet_notation, article_key, number,
-                     pallet_capacity, pallet_limiter_model, resolve_catalog_product)
+                     pallet_capacity, pallet_limiter_model, resolve_catalog_product,
+                     normalize, without_komus_prefix)
 
 PALLET_HEADERS = ('Наименование товара', 'Количество')
+
+def column_title(value):
+    return ' '.join(str(value or '').casefold().replace('ё', 'е').split()).rstrip(':')
+
+def article_columns(titles):
+    aliases = {'артикул комуса': 'komusSku', 'артикул комус': 'komusSku', 'артикул промет': 'sku'}
+    return {aliases[title]: i for i, title in enumerate(titles) if title in aliases}
+
+def moscow_model(value):
+    name = without_komus_prefix(value).upper()
+    match = re.search(r'\bKEY[ .-]?(\d+)(?![\w/-])', name)
+    if match and re.match(r'(КЛЮЧНИЦА|ШКАФ ДЛЯ КЛЮЧЕЙ)\b', name):
+        return 'KEY', match[1]
+    if name.startswith('СЕЙФ '):
+        name = name.translate(str.maketrans('АВСЕНКМОРТХ–—', 'ABCEHKMOPTX--'))
+        match = re.search(r'\b(FRS|ASM|ASK|ASD|SH)[ .-]?\d+[A-Z]*(?:/\d+)?(?:[ .-]?(?:EL|KL|CL|TEL))?(?![\w/-])', name)
+        if match:
+            return 'SAFE', normalize(match[0])
+    return None
 
 def workbook(raw):
     if len(raw)>15*1024*1024: raise ValueError('Файл больше 15 МБ')
@@ -33,37 +53,49 @@ def pallet_template():
     book.save(output)
     return output.getvalue()
 
-def calculate_pallets(raw, catalog):
-    if not catalog:
-        raise ValueError('Сначала загрузите справочник во вкладке «Кратность Тула».')
+def calculate_pallets(raw, catalog, moscow=()):
+    if not catalog and not moscow:
+        raise ValueError('Сначала загрузите справочник во вкладке «Кратность Тула и Москва».')
+    products = [dict(item, warehouse='Тула') for item in catalog]
+    products.extend(dict(item, warehouse='МСК') for item in moscow)
     book = workbook(raw)
     for sheet in book:
         for line, cells in enumerate(sheet.iter_rows(max_row=min(25, sheet.max_row), values_only=True), 1):
-            titles = [' '.join(str(value or '').casefold().split()).rstrip(':') for value in cells]
+            titles = [column_title(value) for value in cells]
             name_col = next((i for i, title in enumerate(titles)
                              if title in ('наименование товара', 'наименование')), None)
             qty_col = next((i for i, title in enumerate(titles)
-                            if title in ('количество', 'количество, шт.', 'кол.', 'кол-во', 'кол-во, шт.')), None)
+                            if title in ('количество', 'количество, шт.', 'кол.', 'кол-во', 'кол-во, шт.', 'заказано, шт.')), None)
             if name_col is not None and qty_col is not None:
-                return calculate_pallet_rows(sheet, line, name_col, qty_col, catalog)
-    raise ValueError('В Excel нужны колонки «Наименование товара» и «Количество». Скачайте шаблон во вкладке «Паллеты».')
+                order_col = titles.index('№ заказа комуса') if '№ заказа комуса' in titles else None
+                return calculate_pallet_rows(sheet, line, name_col, qty_col, products, article_columns(titles), order_col)
+    raise ValueError('Загрузите шаблон заказа Комуса или Excel с колонками «Наименование товара» и «Количество».')
 
-def calculate_pallet_rows(sheet, header_line, name_col, qty_col, catalog):
+def calculate_pallet_rows(sheet, header_line, name_col, qty_col, catalog, articles, order_col):
     if sheet.max_row - header_line > 5000:
         raise ValueError('В одном расчёте допускается до 5 000 строк.')
     rows = []
+    has_moscow = any(item['warehouse'] == 'МСК' for item in catalog)
     for line, cells in enumerate(sheet.iter_rows(min_row=header_line + 1, values_only=True), header_line + 1):
         name = str(cells[name_col] or '').strip()
         quantity = cells[qty_col]
-        if not name and quantity in (None, ''):
+        product = {field: article_key(cells[col]) for field, col in articles.items()}
+        if not name and quantity in (None, '') and not any(product.values()):
             continue
-        result = {'line': line, 'name': name, 'quantity': str(quantity) if quantity is not None else ''}
+        order = article_key(cells[order_col]) if order_col is not None else ''
+        result = {'line': line, 'name': name, 'order': order, 'quantity': str(quantity) if quantity is not None else ''}
         rows.append(result)
         try:
-            if not name:
+            if not name and not any(product.values()):
                 raise ValueError('Укажите наименование товара.')
             result['quantity'] = number(quantity, 'Количество', allow_zero=False)
-            item = dict(resolve_catalog_product({'name': name}, catalog))
+            product['name'] = name
+            item = dict(resolve_catalog_product(product, catalog, 'Тула и Москва' if has_moscow else 'Тула',
+                                                moscow_model if has_moscow else None))
+            result.update(warehouse=item['warehouse'], name=name or item['name'])
+            if item['warehouse'] == 'МСК':
+                result['note'] = 'Позиция Москвы'
+                continue
             apply_two_pallet_notation(item)
             if item.get('needsReview'):
                 raise ValueError('Проверьте кратность товара в справочнике Тула.')
@@ -104,16 +136,59 @@ def parse_date(value,year):
         except ValueError: pass
     return ''
 
+def read_moscow_catalog(book, standalone=False):
+    for sheet in book:
+        for line, values in enumerate(sheet.iter_rows(max_row=min(25, sheet.max_row), values_only=True), 1):
+            titles = [column_title(value) for value in values]
+            region = next((i for i, title in enumerate(titles) if title in ('москва', 'мск')), None)
+            if region is not None and region + 1 < len(values):
+                headings = next(sheet.iter_rows(min_row=line + 1, max_row=line + 1, values_only=True))
+                titles = [column_title(value) if i >= region else '' for i, value in enumerate(headings)]
+                name_col, qty_col = region, region + 1
+                line += 1
+            elif standalone:
+                name_col = next((i for i, title in enumerate(titles)
+                                 if title in ('наименование товара', 'наименование', 'наименование промет')), None)
+                qty_col = next((i for i, title in enumerate(titles)
+                                if title in ('кратность', 'крат-ность', 'кратность, шт.')), None)
+                if name_col is None or qty_col is None:
+                    continue
+            else:
+                continue
+            if sheet.max_row - line > 5000:
+                raise ValueError('В справочнике Москвы допускается до 5 000 строк.')
+            articles = article_columns(titles)
+            rows = []
+            for cells in sheet.iter_rows(min_row=line + 1, values_only=True):
+                name = str(cells[name_col] or '').strip()
+                if not name:
+                    continue
+                amount = cells[qty_col]
+                row = {'name': name, 'original': str(amount).strip() if amount is not None else ''}
+                row.update({field: article_key(cells[col]) for field, col in articles.items()
+                            if article_key(cells[col])})
+                rows.append(row)
+            return rows
+    return []
+
+
+def moscow_catalog_import(raw):
+    catalog = read_moscow_catalog(workbook(raw), standalone=True)
+    if not catalog:
+        raise ValueError('Не найден справочник Москвы. Загрузите книгу с блоком «МОСКВА» или колонками «Наименование» и «Кратность».')
+    return {'moscowCatalog': catalog, 'count': len(catalog), 'warnings': [], 'errors': []}
+
+
 def catalog_import(raw):
     w=workbook(raw); s=w.active; result=[]
-    article_columns={}
+    tula_articles={}
     for cells in s.iter_rows(max_row=2):
         for cell in cells:
             title=' '.join(str(cell.value or '').lower().split()).rstrip(':').strip()
             if title=='артикул комуса' or title=='артикул комус':
-                article_columns.setdefault('komusSku',cell.column-1)
+                tula_articles.setdefault('komusSku',cell.column-1)
             elif title=='артикул промет':
-                article_columns.setdefault('sku',cell.column-1)
+                tula_articles.setdefault('sku',cell.column-1)
     for row in s.iter_rows(min_row=3):
         if len(row)<4 or not row[2].value: continue
         marker_value = row[0].value
@@ -129,13 +204,18 @@ def catalog_import(raw):
                   original=amount,needsReview=review,
                   fixation=LIMITER_PLACEMENT if typ=='loose' and pallet_limiter_model(name) else '',
                   source=f'{s.title}!C{row[2].row}:D{row[2].row}')
-        for field,column in article_columns.items():
+        for field,column in tula_articles.items():
             article=article_key(row[column].value)
             if article:item[field]=article
         apply_two_pallet_notation(item)
         result.append(item)
     if not result:raise ValueError('Не найден справочник Тула: ожидаются маркер A, ВП B, наименование C, кратность D')
-    return {'catalog':result,'warnings':['Для красной 1 запись N*2п означает N шт. на одной паллете 0,5. Две паллеты — минимум при заказе; по машинам они распределяются отдельно. Остальные сложные записи требуют проверки.']}
+    parsed = {'catalog':result,'warnings':['Для красной 1 запись N*2п означает N шт. на одной паллете 0,5. Две паллеты — минимум при заказе; по машинам они распределяются отдельно. Остальные сложные записи требуют проверки.']}
+    moscow = read_moscow_catalog(w)
+    if moscow:
+        parsed['moscowCatalog'] = moscow
+        parsed['warnings'].append(f'В блоке «Москва» найдено позиций: {len(moscow)}.')
+    return parsed
 
 def rows_import(raw,sheet=None,year=None):
     w=workbook(raw)
