@@ -258,6 +258,62 @@ def moscow_catalog_import(raw):
         raise ValueError('Не найден справочник Москвы. Загрузите книгу с блоком «МОСКВА» или колонками «Наименование» и «Кратность».')
     return {'moscowCatalog': catalog, 'count': len(catalog), 'warnings': [], 'errors': []}
 
+def moscow_articles_import(raw, catalog):
+    book = workbook(raw)
+    for sheet in book:
+        for line, cells in enumerate(sheet.iter_rows(max_row=min(25, sheet.max_row), values_only=True), 1):
+            titles = [column_title(value) for value in cells]
+            name = next((i for i, title in enumerate(titles)
+                         if title in ('наименование', 'наименование товара', 'наименование промет')), None)
+            articles = article_columns(titles)
+            if name is not None and len(articles) == len(ARTICLE_FIELDS):
+                return merge_moscow_articles(sheet, line, name, articles, catalog)
+    raise ValueError('Нужны колонки «Наименование», «Артикул ПРОМЕТ» и «Артикул Комуса».')
+
+def merge_moscow_articles(sheet, header, name_col, articles, catalog):
+    if sheet.max_row - header > 5000:
+        raise ValueError('В справочнике Москвы допускается до 5 000 строк.')
+    result = [dict(item) for item in catalog]
+    by_name, by_model = defaultdict(list), defaultdict(list)
+    for index, item in enumerate(result):
+        by_name[product_name_key(item['name'])].append(index)
+        model = moscow_model(item['name'])
+        if model:
+            by_model[model].append(index)
+    changes, errors, touched = [], [], set()
+    for line, cells in enumerate(sheet.iter_rows(min_row=header + 1, values_only=True), header + 1):
+        name = str(cells[name_col] or '').strip()
+        codes = {field: article_key(cells[i]) for field, i in articles.items()}
+        codes = {field: code for field, code in codes.items() if code}
+        if not name and not codes:
+            continue
+        matches = by_name[product_name_key(name)] or by_model.get(moscow_model(name), [])
+        if not product_name_key(name) or not codes or len(matches) > 1:
+            errors.append({'line': line, 'reason': 'Нужны однозначное наименование и хотя бы один артикул.'})
+            continue
+        index = matches[0] if matches else len(result)
+        if index in touched:
+            errors.append({'line': line, 'reason': 'Позиция повторяется в файле.'})
+            continue
+        touched.add(index)
+        if not matches:
+            result.append({'name': name, 'original': ''})
+            by_name[product_name_key(name)].append(index)
+            model = moscow_model(name)
+            if model:
+                by_model[model].append(index)
+        result[index].update(codes)
+        changes.append((line, index, codes))
+    codes_count = defaultdict(int)
+    for item in result:
+        for field in ARTICLE_FIELDS:
+            codes_count[field, article_key(item.get(field))] += 1
+    for line, _, codes in changes:
+        if any(codes_count[pair] > 1 for pair in codes.items()):
+            errors.append({'line': line, 'reason': 'Артикул уже указан для другой позиции Москвы.'})
+    return {'moscowCatalog': result, 'changes': [result[index] for _, index, _ in changes],
+            'count': len(changes), 'errors': errors}
+
 
 def catalog_import(raw):
     w=workbook(raw); s=w.active; result=[]

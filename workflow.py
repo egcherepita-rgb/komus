@@ -112,7 +112,7 @@ def apply_import(state,kind,parsed,meta):
         state['catalog']=deepcopy(parsed['catalog']);state['catalogUpdated']=now()
         if 'moscowCatalog' in parsed:
             state['moscowCatalog']=deepcopy(parsed['moscowCatalog']);state['moscowCatalogUpdated']=now()
-    elif kind=='moscow':
+    elif kind in ('moscow','moscow-articles'):
         state['moscowCatalog']=deepcopy(parsed['moscowCatalog']);state['moscowCatalogUpdated']=now()
     elif kind=='response':
         index={r['id']:r for r in state['rows']}; changes=parsed['changes']
@@ -137,7 +137,7 @@ def apply_import(state,kind,parsed,meta):
     else:raise ValueError('Неизвестный тип загрузки')
     if len(state['rows'])>5000:raise ValueError('В журнале не может быть более 5000 позиций')
     state['imports'].append(dict(meta,kind=kind,lines=parsed.get('count',len(parsed.get('rows',parsed.get('catalog',[]))))))
-    if kind!='moscow':state['plan']=None
+    if kind not in ('moscow','moscow-articles'):state['plan']=None
     return {'duplicate':False,'message':'Данные загружены и сохранены на сервере.'}
 
 def update_row(state,rid,changes):

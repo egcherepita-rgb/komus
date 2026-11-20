@@ -160,6 +160,34 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(sheet.cell(5,headers['Наименование товара']).data_type,'s')
         self.assertEqual(sheet.cell(5,headers['Примечание']).value,'Нет в справочнике')
         self.assertEqual(ledger_store.read(server.DATA)[0],applied['revision'])
+    def test_moscow_article_file_enriches_catalog_and_reaches_pallet_export(self):
+        client = self.client()
+        state = server.demo()
+        state['moscowCatalog'] = [{'name':'Ключница KEY-40','original':'20'},
+                                  {'name':'Ключница KEY-60','original':'10'}]
+        rev, _, _ = ledger_store.mutate(server.DATA,0,lambda current:current.update(state))
+        book = Workbook()
+        book.active.append(['Наименование','Артикул ПРОМЕТ','Артикул Комуса'])
+        book.active.append(['Шкаф для ключей AIKO KEY-40','P-40','00040'])
+        raw = BytesIO()
+        book.save(raw)
+        preview = json.load(self.request(client,'/api/v2/import-preview?kind=moscow-articles',raw.getvalue(),raw=True))
+        self.assertFalse(preview['errors'])
+        applied = json.load(self.request(client,'/api/v2/import-apply',{'token':preview['token'],'revision':rev}))
+        self.assertEqual(applied['state']['plan'],state['plan'])
+        self.assertEqual(applied['state']['moscowCatalog'],[
+            {'name':'Ключница KEY-40','original':'20','sku':'P-40','komusSku':'00040'},
+            {'name':'Ключница KEY-60','original':'10'}])
+
+        book = Workbook()
+        book.active.append(['Наименование','Количество'])
+        book.active.append(['Ключница KEY-40',10])
+        raw = BytesIO()
+        book.save(raw)
+        calculated = json.load(self.request(client,'/api/v2/pallets',raw.getvalue(),raw=True))
+        exported = self.request(client,'/api/v2/pallets/export',{'rows':calculated['rows']}).read()
+        sheet = load_workbook(BytesIO(exported),data_only=True).active
+        self.assertEqual([sheet.cell(2,col).value for col in (4,5,6)],['00040','P-40','МСК'])
     def test_bulk_request_contains_all_open_orders_and_only_open_rows(self):
         c=self.client();state=wf.empty_state()
         def row(rid,order,shipped=0):

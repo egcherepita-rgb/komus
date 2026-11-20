@@ -5,7 +5,8 @@ from pathlib import Path
 import hashlib, hmac, json, mimetypes, os, secrets, sqlite3, time, threading
 from datetime import date
 from planner import build_plan, LAYOUTS
-from importer import calculate_pallets, catalog_import, export_pallets, export_plan, moscow_catalog_import, pallet_template
+from importer import (calculate_pallets, catalog_import, export_pallets, export_plan,
+                      moscow_articles_import, moscow_catalog_import, pallet_template)
 import ledger_store
 from workflow import empty_state,public_state,make_plan,apply_import,update_row,dispatch,now,today,canonical_order,validate_row
 from workflow import clear_plan, transition_row
@@ -55,6 +56,8 @@ def preview_import(raw,query,revision):
         parsed=catalog_import(raw);parsed['errors']=[];parsed['count']=len(parsed['catalog'])
     elif kind=='moscow':
         parsed=moscow_catalog_import(raw)
+    elif kind=='moscow-articles':
+        parsed=moscow_articles_import(raw,state.get('moscowCatalog',[]))
     else:raise ValueError('Неизвестный тип загрузки')
     if 'sheets' in parsed:return parsed
     if not parsed.get('count',len(parsed.get('rows',[]))):
