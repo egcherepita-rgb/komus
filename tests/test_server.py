@@ -104,7 +104,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(applied['state']['moscowCatalog'],[{'name':'Ключница KEY-40','original':'20','komusSku':'1234'}])
 
         book = load_workbook(BytesIO(template_file('order')))
-        book.active.append(['К-1','С-1',1234,None,'Название из заказа',20,None,None])
+        book.active.append(['К-1','С-1',1234,'000045','Название из заказа',20,None,None])
         book.active.append(['К-1','С-1',None,None,'Шкаф для ключей AIKO KEY-40 на 40 ключей',20,None,None])
         book.active.append(['К-1','С-1',None,None,'Демонстрационный шкаф',40,None,None])
         raw = BytesIO()
@@ -113,10 +113,29 @@ class ServerTests(unittest.TestCase):
         first, second, third = checked['rows']
         self.assertEqual([r['warehouse'] for r in (first,second,third)],['МСК','МСК','Тула'])
         self.assertEqual(first['order'],'К-1')
+        self.assertEqual(first['sku'],'000045')
+        self.assertEqual(second['komusSku'],'1234')
         self.assertNotIn('blackFull',first)
         self.assertEqual(third['blackFull'],2)
         self.assertEqual(json.load(self.request(client,'/api/v2/state')), {
             'revision':applied['revision'],'state':applied['state'],'result':None})
+        # Export every visible row, including a row requiring review.
+        checked['rows'].append({'line':8,'name':'=1+1','komusSku':'00007','quantity':1,'error':'Нет в справочнике'})
+        response = self.request(client,'/api/v2/pallets/export',{'rows':checked['rows']})
+        self.assertIn('komus-pallets.xlsx',response.headers['Content-Disposition'])
+        sheet = load_workbook(BytesIO(response.read()),data_only=False).active
+        headers = {cell.value:cell.column for cell in sheet[1]}
+        self.assertEqual(sheet.max_row,5)
+        self.assertEqual(sheet.cell(2,headers['Артикул ПРОМЕТ']).value,'000045')
+        self.assertEqual(sheet.cell(3,headers['Артикул Комуса']).value,'1234')
+        self.assertEqual(sheet.cell(3,headers['Площадка']).value,'МСК')
+        self.assertIsNone(sheet.cell(3,headers['Чёрная 1']).value)
+        self.assertEqual(sheet.cell(4,headers['Площадка']).value,'Тула')
+        self.assertEqual(sheet.cell(4,headers['Чёрная 1']).value,2)
+        self.assertEqual(sheet.cell(4,headers['Красная 1']).value,0)
+        self.assertEqual(sheet.cell(5,headers['Наименование товара']).data_type,'s')
+        self.assertEqual(sheet.cell(5,headers['Примечание']).value,'Нет в справочнике')
+        self.assertEqual(ledger_store.read(server.DATA)[0],applied['revision'])
     def test_bulk_request_contains_all_open_orders_and_only_open_rows(self):
         c=self.client();state=wf.empty_state()
         def row(rid,order,shipped=0):

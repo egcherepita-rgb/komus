@@ -10,6 +10,21 @@ from planner import (LIMITER_PLACEMENT, apply_two_pallet_notation, article_key, 
                      normalize, without_komus_prefix)
 
 PALLET_HEADERS = ('Наименование товара', 'Количество')
+PALLET_RESULT_COLUMNS = (
+    ('line', 'Строка Excel'),
+    ('order', '№ заказа Комуса'),
+    ('name', 'Наименование товара'),
+    ('komusSku', 'Артикул Комуса'),
+    ('sku', 'Артикул ПРОМЕТ'),
+    ('warehouse', 'Площадка'),
+    ('quantity', 'Количество, шт.'),
+    ('capacity', 'Шт. в паллете'),
+    ('redFull', 'Красная 1'),
+    ('blackFull', 'Чёрная 1'),
+    ('redHalf', 'Красная 0,5'),
+    ('remainder', 'Остаток, шт.'),
+    ('note', 'Примечание'),
+)
 
 def column_title(value):
     return ' '.join(str(value or '').casefold().replace('ё', 'е').split()).rstrip(':')
@@ -84,6 +99,7 @@ def calculate_pallet_rows(sheet, header_line, name_col, qty_col, catalog, articl
             continue
         order = article_key(cells[order_col]) if order_col is not None else ''
         result = {'line': line, 'name': name, 'order': order, 'quantity': str(quantity) if quantity is not None else ''}
+        result.update(product)
         rows.append(result)
         try:
             if not name and not any(product.values()):
@@ -93,6 +109,8 @@ def calculate_pallet_rows(sheet, header_line, name_col, qty_col, catalog, articl
             item = dict(resolve_catalog_product(product, catalog, 'Тула и Москва' if has_moscow else 'Тула',
                                                 moscow_model if has_moscow else None))
             result.update(warehouse=item['warehouse'], name=name or item['name'])
+            for field in ('komusSku', 'sku'):
+                result[field] = product.get(field) or article_key(item.get(field))
             if item['warehouse'] == 'МСК':
                 result['note'] = 'Позиция Москвы'
                 continue
@@ -114,7 +132,24 @@ def calculate_pallet_rows(sheet, header_line, name_col, qty_col, catalog, articl
             result['error'] = str(error)
     if not rows:
         raise ValueError('В файле нет заполненных строк.')
-    return {'sheet': sheet.title, 'rows': rows}
+    return {'sheet': sheet.title, 'columns': PALLET_RESULT_COLUMNS, 'rows': rows}
+
+def export_pallets(rows):
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 5000:
+        raise ValueError('Для выгрузки нужно от 1 до 5 000 строк расчёта.')
+    book = Workbook()
+    sheet = book.active
+    sheet.title = 'Паллеты'
+    sheet.append([title for _, title in PALLET_RESULT_COLUMNS])
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError('Неверный формат строки расчёта.')
+        values = [row.get(key) for key, _ in PALLET_RESULT_COLUMNS]
+        values[-1] = row.get('error') or values[-1]
+        if any(value is not None and type(value) not in (str, int) for value in values):
+            raise ValueError('Неверный формат значения в строке расчёта.')
+        sheet.append(values)
+    return finish_export(book)
 
 def red(cell):
     c=cell.font.color
@@ -262,6 +297,9 @@ def export_plan(plan):
     r=w.create_sheet('Остаток');r.append(['Заказ','Счёт','Наименование','Количество','Причина'])
     for x in plan['leftovers']:r.append([x['order'],x['invoice'],x['name'],x['qty'],x['reason']])
     n=w.create_sheet('Примечания');n.append(['Условия расчёта']);n.append([plan['notice']]);n.append(['Горизонт, дней',plan['horizon']]);n.append(['Критерий полной машины: строго одна из 12 утверждённых укладок.'])
+    return finish_export(w)
+
+def finish_export(w):
     for sh in w:
         sh.freeze_panes='A2';sh.auto_filter.ref=sh.dimensions
         for c in sh[1]:c.font=Font(color='FFFFFF',bold=True);c.fill=PatternFill('solid',fgColor='005BA8')

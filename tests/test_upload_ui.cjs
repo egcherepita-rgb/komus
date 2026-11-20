@@ -7,7 +7,7 @@ const path = require('node:path');
 // Execute the real client handlers with an isolated DOM/API adapter.
 // No browser session, customer workbook, or production data is involved.
 function client({ upload = true } = {}) {
-  const elements = new Map(), events = new Map(), calls = [], replies = [];
+  const elements = new Map(), events = new Map(), calls = [], replies = [], downloads = [];
   const element = id => {
     if (!elements.has(id)) elements.set(id, {
       value: '', files: [], hidden: false, disabled: false, open: false,
@@ -19,25 +19,28 @@ function client({ upload = true } = {}) {
   };
   const context = vm.createContext({
     URLSearchParams, Intl, Date, console,
+    URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} },
+    setTimeout: callback => callback(),
     location: { pathname: '/' }, localStorage: { getItem() { return null; } },
     document: {
       getElementById: element, addEventListener(type, listener) { events.set(type, listener); },
+      createElement: () => ({ click() { downloads.push(this.download); }, remove() {} }),
       querySelectorAll: selector => selector === '.mutation' ? [element('applyImport'), element('previewButton')] : [],
-      body: { classList: { add() {} } },
+      body: { classList: { add() {} }, append() {} },
     },
     fetch: async (url, options) => {
       if (url === '/api/session') return { ok: true, json: async () => ({ authenticated: false }) };
       calls.push({ url, options });
       if (!replies.length) throw Error('Unexpected request: ' + url);
       const reply = replies.shift();
-      return { ok: true, status: 200, json: async () => await reply };
+      return { ok: true, status: 200, json: async () => await reply, blob: async () => await reply };
     },
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../public/app.js'), 'utf8'), context);
   if (upload) vm.runInContext("showUpload('initial')", context);
   element('uploadFile').files = [{ name: 'initial.xlsx', size: 100 }];
   element('uploadYear').value = '2026'; element('initialMode').value = 'full';
-  return { element, calls, replies, run: code => vm.runInContext(code, context),
+  return { element, calls, replies, downloads, run: code => vm.runInContext(code, context),
     click: dataset => events.get('click')({ target: { closest: () => ({ dataset }) } }),
     check: () => vm.runInContext("$('uploadForm').onsubmit({preventDefault(){}})", context) };
 }
@@ -109,19 +112,30 @@ test('pallet calculator uploads a workbook and renders calculations and unmatche
   const c = client({ upload: false });
   const workbook = { name: 'pallets.xlsx', size: 100 };
   c.element('palletsFile').files = [workbook];
-  c.replies.push({ sheet: 'Паллеты', rows: [
-    { line: 2, name: 'Шкаф', quantity: 67, capacity: 22, redFull: 1, blackFull: 0, redHalf: 1, remainder: 1 },
+  const result = { sheet: 'Паллеты', columns: [['name','Товар'],['sku','Артикул ПРОМЕТ'],['warehouse','Площадка'],['redHalf','Красная 0,5'],['note','Примечание']], rows: [
+    { line: 2, name: 'Шкаф', sku: '0007', quantity: 67, capacity: 22, redFull: 1, blackFull: 0, redHalf: 1, remainder: 1 },
     { line: 3, name: 'Другая позиция', quantity: 1, error: 'Нет в справочнике' },
     { line: 4, name: 'Ключница', quantity: 20, order: 'К-1', warehouse: 'МСК' },
-  ] });
+  ] };
+  c.replies.push(result);
   await c.run("$('palletsForm').onsubmit({preventDefault(){}})");
   assert.equal(c.calls[0].url, '/api/v2/pallets');
   assert.equal(c.calls[0].options.body, workbook);
   assert.equal(c.element('palletsResults').hidden, false);
   assert.match(c.element('palletsResults').innerHTML, /Красная 0,5/);
+  assert.match(c.element('palletsResults').innerHTML, /Артикул ПРОМЕТ/);
+  assert.match(c.element('palletsResults').innerHTML, /0007/);
   assert.match(c.element('palletsResults').innerHTML, /Нет в справочнике/);
   assert.match(c.element('palletsResults').innerHTML, /<span class="tag purple">МСК<\/span>/);
   assert.match(c.element('palletsStatus').textContent, /Рассчитано 1 из 3 позиций. МСК: 1/);
+  assert.equal(c.element('exportPallets').disabled, false);
+  c.replies.push('xlsx');
+  await c.run("$('exportPallets').onclick()");
+  assert.equal(c.calls[1].url, '/api/v2/pallets/export');
+  assert.deepEqual(JSON.parse(c.calls[1].options.body), { rows: result.rows });
+  assert.deepEqual(c.downloads, ['komus-pallets.xlsx']);
+  c.run("$('palletsFile').onchange()");
+  assert.equal(c.element('exportPallets').disabled, true);
 });
 
 test('history groups manual shipments by date and displays known trucks separately', () => {

@@ -9,12 +9,14 @@ const importNames={initial:'Первоначальный файл отгрузо
 let state=null,revision=0,busy=false,month=today().slice(0,7),uploadKind='',uploadToken=null,uploadGeneration=0,editing=null,dispatching=null;
 let layouts=[],layoutsLoading=null;
 let rowTransition=null,planToClear=null;
+let palletRows=null,palletsExporting=false;
 function banner(message,error=false){$('banner').hidden=!message;$('banner').textContent=message||'';$('banner').classList.toggle('error',error);}
 function lock(value){busy=value;document.querySelectorAll('.mutation').forEach(b=>b.disabled=value||readOnly);if(!value&&$('uploadDialog').open)$('applyImport').disabled=readOnly||!uploadToken;}
-async function request(path,{body,raw=false}={}){
+async function request(path,{body,raw=false,binary=false}={}){
  if(readOnly&&body!==undefined)throw Error('Демонстрация доступна только для просмотра. Для своего журнала войдите в приложение.');
  const headers=body===undefined?{}:{'X-Komus-Client':'web',...(raw?{'X-Komus-Revision':String(revision)}:{'Content-Type':'application/json'})};
  const res=await fetch('/api/'+path,{method:body===undefined?'GET':'POST',headers,body:body===undefined?undefined:raw?body:JSON.stringify(body)});
+ if(res.ok&&binary)return res.blob();
  const result=await res.json().catch(()=>({error:'Некорректный ответ сервера'}));
  if(!res.ok){if(res.status===401&&path!=='login'){document.querySelectorAll('dialog[open]').forEach(d=>d.close());$('shell').hidden=true;$('login').hidden=false;}
  if(res.status===409){await loadState();uploadToken=null;}
@@ -27,31 +29,35 @@ function tab(name){document.querySelectorAll('section[id^="view-"]').forEach(s=>
 function table(headers,rows,empty='Пока нет данных'){return `<table><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.length?rows.map(r=>'<tr>'+r.map(c=>'<td>'+c+'</td>').join('')+'</tr>').join(''):`<tr><td colspan="${headers.length}">${esc(empty)}</td></tr>`}</tbody></table>`;}
 function download(path){if(readOnly){banner('Войдите в приложение, чтобы скачать рабочий шаблон.');return;}const a=document.createElement('a');a.href=path;a.download='';document.body.append(a);a.click();a.remove();}
 function renderPalletCalculation(result){
- const cols=['Строка Excel','Заказ','Товар','Склад','Количество, шт.','Шт. в паллете','Красная 1','Чёрная 1','Красная 0,5','Остаток, шт.','Примечание'];
- const values=result.rows.map(r=>[
-  fmt(r.line),esc(r.order||'—'),esc(r.name),r.warehouse==='МСК'?'<span class="tag purple">МСК</span>':esc(r.warehouse||'—'),
-  esc(r.quantity),r.capacity?fmt(r.capacity):'—',
-  ...['redFull','blackFull','redHalf','remainder'].map(key=>r.error||r.warehouse==='МСК'?'—':fmt(r[key])),
-  r.error?`<span class="tag amber">${esc(r.error)}</span>`:esc(r.note||'')
- ]);
+ const values=result.rows.map(row=>result.columns.map(([key])=>{
+  if(key==='warehouse'&&row.warehouse==='МСК')return '<span class="tag purple">МСК</span>';
+  if(key==='note'&&row.error)return `<span class="tag amber">${esc(row.error)}</span>`;
+  if(typeof row[key]==='number')return fmt(row[key]);
+  return esc(row[key]|| (key==='note'?'':'—'));
+ }));
  const errors=result.rows.filter(r=>r.error).length;
  const moscow=result.rows.filter(r=>r.warehouse==='МСК').length;
- $('palletsResults').innerHTML=table(cols,values);
+ $('palletsResults').innerHTML=table(result.columns.map(([,title])=>title),values);
  $('palletsResults').hidden=false;
+ palletRows=result.rows;
+ $('exportPallets').disabled=palletsExporting;
  $('palletsStatus').textContent=`Лист «${result.sheet}». Рассчитано ${result.rows.length-errors-moscow} из ${result.rows.length} позиций.`+
   (moscow?` МСК: ${moscow}.`:'')+
   (errors?` Требуют проверки: ${errors}.`:'');
 }
-$('palletsFile').onchange=()=>{
+function clearPalletCalculation(){
+ palletRows=null;
+ $('exportPallets').disabled=true;
  $('palletsResults').hidden=true;
  $('palletsStatus').textContent='';
-};
+}
+$('palletsFile').onchange=clearPalletCalculation;
 $('palletsForm').onsubmit=async event=>{
  event.preventDefault();
  const input=$('palletsFile'),button=$('calculatePallets'),file=input.files[0];
  if(readOnly||button.disabled||!file)return;
  input.disabled=button.disabled=true;
- $('palletsResults').hidden=true;
+ clearPalletCalculation();
  $('palletsStatus').textContent='Считаем паллеты…';
  try{
   renderPalletCalculation(await request('v2/pallets',{body:file,raw:true}));
@@ -59,6 +65,27 @@ $('palletsForm').onsubmit=async event=>{
   $('palletsStatus').textContent=error.message;
  }finally{
   input.disabled=button.disabled=false;
+ }
+};
+$('exportPallets').onclick=async()=>{
+ if(!palletRows||palletsExporting||readOnly)return;
+ const exportButton=$('exportPallets');
+ exportButton.disabled=palletsExporting=true;
+ try{
+  const file=await request('v2/pallets/export',{body:{rows:palletRows},binary:true});
+  const url=URL.createObjectURL(file);
+  const link=document.createElement('a');
+  link.href=url;
+  link.download='komus-pallets.xlsx';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+ }catch(error){
+  banner(error.message,true);
+ }finally{
+  palletsExporting=false;
+  exportButton.disabled=!palletRows;
  }
 };
 function fileTable(files){return table(['Тип','Файл / лист','Когда загружен','Строк','Исходник'],files.slice().reverse().map(f=>[esc(importNames[f.kind]||f.kind),esc(f.filename)+(f.sheet?`<small class="row-note">${esc(f.sheet)}</small>`:''),esc(datefmt(f.at)),fmt(f.lines),`<button class="compact-action" data-download="/api/v2/source?sha=${esc(f.sha)}">Скачать</button>`]));}

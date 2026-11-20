@@ -5,7 +5,7 @@ from pathlib import Path
 import hashlib, hmac, json, mimetypes, os, secrets, sqlite3, time, threading
 from datetime import date
 from planner import build_plan, LAYOUTS
-from importer import calculate_pallets, catalog_import, export_plan, moscow_catalog_import, pallet_template
+from importer import calculate_pallets, catalog_import, export_pallets, export_plan, moscow_catalog_import, pallet_template
 import ledger_store
 from workflow import empty_state,public_state,make_plan,apply_import,update_row,dispatch,now,today,canonical_order,validate_row
 from workflow import clear_plan, transition_row
@@ -183,6 +183,10 @@ class Handler(BaseHTTPRequestHandler):
                 _,state=ledger_store.read(DATA)
                 return self.send(200,calculate_pallets(raw,state['catalog'],state.get('moscowCatalog',[])))
             data=json.loads(self.body());expected=data.get('revision')
+            if path=='/api/v2/pallets/export':
+                return self.send(200,export_pallets(data.get('rows')),
+                                 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                                 {'Content-Disposition':'attachment; filename="komus-pallets.xlsx"'})
             if path=='/api/v2/import-apply':
                 token=data.get('token','')
                 with LOCK:entry=PREVIEWS.get(token)
