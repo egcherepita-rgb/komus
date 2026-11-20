@@ -234,6 +234,7 @@ def make_plan(state):
                 unit=r['id'];mapping[unit]=r
                 units.append({'id':unit,'name':r['name'],'order':r['order'],'invoice':r.get('invoice',''),
                               'sku':r.get('sku'),'komusSku':r.get('komusSku'),'prometName':r.get('prometName'),
+                              'urgent':bool(r.get('urgent')),
                               'qty':left,'shipped':0,'ready':ready,'due':r['due'],'lots':limit_lots(r['lots'],left)})
             else:extra.append({'rowId':r['id'],'order':r['order'],'position':r['position'],'invoice':r.get('invoice',''),
                  'name':r['name'],'qty':left,'reason':'Нет даты готовности позиции от Донцовой'})
@@ -255,8 +256,50 @@ def make_plan(state):
         r=mapping[item['rowId']];item.update(rowId=r['id'],position=r['position'])
     for item in p['issues']:
         r=mapping[item['rowId']];item['rowId']=r['id']
-    p['leftovers'].extend(extra);p['issues'].extend(issues);p['id']=uid();p['createdAt']=now();p['readinessMode']='position'
+    p['leftovers'].extend(extra)
+    urgent_ids={row['id'] for row in state['rows'] if row.get('urgent')}
+    for item in p['leftovers']:
+        item['urgent']=item['rowId'] in urgent_ids
+    p['issues'].extend(issues);p['id']=uid();p['createdAt']=now();p['readinessMode']='position'
     state['plan']=p;return p
+
+def set_order_urgency(state, row_id, urgent):
+    if type(urgent) is not bool:
+        raise ValueError('Укажите признак срочности.')
+    row=next((item for item in state['rows'] if item['id']==row_id),None)
+    if row is None or row['qty']<=row['shipped']:
+        raise ValueError('Открытая позиция заказа не найдена.')
+    row['urgent']=urgent
+    if state.get('plan'):
+        for item in state['plan']['leftovers']:
+            if item['rowId']==row_id:
+                item['urgent']=urgent
+        for truck in state['plan']['trucks']:
+            for pallet in truck['pallets']+truck['loose']:
+                if pallet['rowId']==row_id:
+                    pallet['urgent']=urgent
+    return {'message':'Отметка сохранена. Срочность учитывается при следующей сборке машин.'}
+
+def exchange_pallets(state, plan_id, source_id, source_index, target_id, target_index):
+    plan=state.get('plan')
+    if not plan or plan['id']!=plan_id or not plan.get('wholePalletsOnly') or plan.get('readinessMode')!='position':
+        raise ValueError('План изменился. Откройте актуальную машину.')
+    trucks={truck['id']:truck for truck in plan['trucks']}
+    source,target=trucks.get(source_id),trucks.get(target_id)
+    if source is None or target is None or source is target:
+        raise ValueError('Выберите две разные плановые машины.')
+    if source_index>=len(source['pallets']) or target_index>=len(target['pallets']):
+        raise ValueError('Место паллеты не найдено.')
+    left,right=source['pallets'][source_index],target['pallets'][target_index]
+    if left['type']!=right['type'] or left.get('partial') or right.get('partial'):
+        raise ValueError('Обмен возможен между целыми паллетами одного типа.')
+    if left['ready']>target['date'] or right['ready']>source['date']:
+        raise ValueError('Одна из паллет ещё не будет готова к выезду выбранной машины.')
+    source['pallets'][source_index],target['pallets'][target_index]=right,left
+    for truck in (source,target):
+        truck['late']=sum(pallet['due']<truck['date'] for pallet in truck['pallets'])
+    plan['manualAdjustments']=True
+    return {'message':'Паллеты поменялись местами. Схемы загрузки обеих машин сохранены.'}
 
 def dispatch(state,plan_id,truck_id,actual_date):
     existing=next((s for s in state['shipments'] if s['planId']==plan_id and s['id']==truck_id),None)
@@ -294,5 +337,9 @@ def dispatch(state,plan_id,truck_id,actual_date):
         lot['qty']-=qty;r['shipped']+=qty;r['lots']=[l for l in r['lots'] if l['qty']>0]
         validate_row(r)
     sent=deepcopy(t);sent.update(planId=plan_id,actualDate=actual_date,markedAt=now(),shipmentId=uid(),plannedSlot=t['slot'],slot=day_count+1)
-    state['shipments'].append(sent);make_plan(state)
+    state['shipments'].append(sent)
+    if p.get('manualAdjustments') and actual_date==t['date'] and sent['slot']==t['slot']:
+        p['trucks'].remove(t)
+        return {'duplicate':False,'message':'Машина отгружена. Ручная раскладка остальных машин сохранена.'}
+    make_plan(state)
     return {'duplicate':False,'message':'Машина отгружена. Остатки списаны, план по оставшемуся товару пересобран.'}

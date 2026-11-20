@@ -172,6 +172,30 @@ test('shipment history searches name, both articles, order and invoice, includin
   }
 });
 
+test('pallet exchange offers only a compatible ready pallet and sends both places', async () => {
+  const c = client({ upload: false });
+  c.run(`const item={name:'Паллета',qty:20,order:'45001',type:'single',ready:'2026-11-17',due:'2026-11-19'};
+    state={plan:{id:'plan',trucks:[
+      {id:1,date:'2026-11-18',pallets:[item]},
+      {id:2,date:'2026-11-19',pallets:[{...item,type:'double'}, {...item,name:'Готов к обмену'}]},
+      {id:3,date:'2026-11-20',pallets:[{...item,ready:'2026-11-20'}]},
+    ]}}; revision=4;render=()=>{}`);
+  c.click({pallet:'0',truck:'1'});
+  assert.match(c.element('palletTargetTruck').innerHTML,/value="2"/);
+  assert.doesNotMatch(c.element('palletTargetTruck').innerHTML,/value="3"/);
+  c.element('palletTargetTruck').value='2';
+  c.run("$('palletTargetTruck').onchange()");
+  assert.match(c.element('palletTargetPlace').innerHTML,/Готов к обмену/);
+  assert.doesNotMatch(c.element('palletTargetPlace').innerHTML,/value="0"/);
+  c.element('palletTargetPlace').value='1';
+  c.replies.push({revision:5,state:{},result:{}});
+  await c.run("$('palletExchangeForm').onsubmit({preventDefault(){}})");
+  assert.equal(c.calls[0].url,'/api/v2/pallet-exchange');
+  assert.deepEqual(JSON.parse(c.calls[0].options.body),{
+    revision:4,planId:'plan',sourceId:1,sourceIndex:0,targetId:2,targetIndex:1,
+  });
+});
+
 test('leftover searches the journal article and uses the same shipment dialog', async () => {
   const c = client({ upload: false });
   c.run(`state={rows:[{id:'a',order:'45001',name:'Стеллаж',sku:'P-11',qty:40,shipped:10},{id:'b',name:'Ключница',qty:10,shipped:0}],

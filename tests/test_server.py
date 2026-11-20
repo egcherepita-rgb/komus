@@ -364,6 +364,62 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(shipped['manualShipments'][0]['sku'],'P-11')
         self.assertEqual(sum(r['qty'] for r in shipped['plan']['leftovers'] if r['rowId']=='demo3'),40)
 
+    def test_urgency_and_manual_exchange_are_saved_and_dispatch_preserves_other_trucks(self):
+        client=self.client()
+        state=server.demo()
+        first=state['rows'][0]
+        first.update(qty=260,lots=[{'part':'1','qty':260,'ready':'2026-11-17'}])
+        second=dict(first,id='priority',order='45002',due='2026-11-25')
+        state['rows']=[first,second]
+        wf.make_plan(state)
+        rev,_,_=ledger_store.mutate(server.DATA,0,lambda current:current.update(state))
+        marked=json.load(self.request(client,'/api/v2/row-urgency',{'id':'priority','urgent':True,'revision':rev}))
+        self.assertTrue(marked['state']['rows'][1]['urgent'])
+        self.assertEqual(marked['state']['plan']['id'],state['plan']['id'])
+        built=json.load(self.request(client,'/api/v2/build',{'revision':marked['revision'],'strategy':'compact'}))
+        plan=built['state']['plan']
+        a,b=plan['trucks']
+        self.assertEqual(a['pallets'][0]['rowId'],'priority')
+        self.assertEqual(b['pallets'][0]['rowId'],'demo1')
+        b['pallets'][0]['ready']=b['date']
+        with self.assertRaisesRegex(ValueError,'не будет готова'):
+            wf.exchange_pallets(built['state'],plan['id'],a['id'],0,b['id'],0)
+        b['pallets'][0]['ready']=a['date']
+        b['pallets'][0]['type']='double'
+        with self.assertRaisesRegex(ValueError,'одного типа'):
+            wf.exchange_pallets(built['state'],plan['id'],a['id'],0,b['id'],0)
+        data={'revision':built['revision'],'planId':plan['id'],'sourceId':a['id'],'sourceIndex':0,
+              'targetId':b['id'],'targetIndex':0}
+        exchanged=json.load(self.request(client,'/api/v2/pallet-exchange',data))
+        a2,b2=exchanged['state']['plan']['trucks']
+        self.assertEqual((a2['layout'],b2['layout']),(a['layout'],b['layout']))
+        self.assertEqual((a2['pallets'][0]['rowId'],b2['pallets'][0]['rowId']),('demo1','priority'))
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request(client,'/api/v2/pallet-exchange',data)
+        self.assertEqual(error.exception.code,409)
+        sent=json.load(self.request(client,'/api/v2/dispatch',{'revision':exchanged['revision'],'planId':plan['id'],
+                       'truckId':a['id'],'actualDate':a['date']}))
+        self.assertEqual(sent['state']['plan']['trucks'],[b2])
+
+    def test_initial_yellow_import_uses_order_fields_and_ignores_schedule_header(self):
+        client=self.client()
+        book=Workbook()
+        sheet=book.active
+        sheet.append([None,None,None,'15:30'])
+        sheet.append(['№ заказа','Наименование','Количество','Рейс'])
+        sheet.append(['45001','Стеллаж',24,None])
+        sheet.append([None,'Шкаф',10,None])
+        sheet.append(['45002','Сейф',1,None])
+        from openpyxl.styles import PatternFill
+        for key in ('D1','A3','D5'):
+            sheet[key].fill=PatternFill('solid',fgColor='FFFF00')
+        raw=BytesIO()
+        book.save(raw)
+        result=json.load(self.request(client,'/api/v2/import-preview?kind=initial&sheet=Sheet&mode=full',
+                                      raw.getvalue(),raw=True))
+        self.assertFalse(result['errors'])
+        self.assertEqual([bool(row.get('urgent')) for row in result['rows']],[True,True,False])
+
     def test_readiness_build_dispatch_and_persistent_remaining_via_http(self):
         c=self.client();rev=0
         def upload(raw,kind,sheet):

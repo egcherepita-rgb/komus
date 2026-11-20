@@ -275,7 +275,7 @@ def whole_pallets(r,left,cap):
 
 def allocate_trucks(pallets, loose, start, horizon, daily_used, strategy, schedule=None):
     trucks=[]
-    def priority(p): return (p['due'],p['ready'],p['rowId'])
+    def priority(p): return (not p.get('urgent'),p['due'],p['ready'],p['rowId'])
     for offset in range(horizon):
         day=start+timedelta(days=offset)
         if day.weekday()>4: continue
@@ -298,7 +298,7 @@ def allocate_trucks(pallets, loose, start, horizon, daily_used, strategy, schedu
                 if strategy=='compact': score=(len(selected),layout['length'],deadline_score)
                 elif strategy=='balanced': score=(sum(p['due']<=day.isoformat() for p in selected),len(selected),urgent)
                 else: score=(deadline_score,len(selected),layout['length'])
-                candidates.append((score,layout,selected))
+                candidates.append(((sum(bool(p.get('urgent')) for p in selected),*score),layout,selected))
             if not candidates: break
             _,layout,selected=max(candidates,key=lambda c:c[0])
             chosen={id(p) for p in selected}; pallets=[p for p in pallets if id(p) not in chosen]
@@ -390,7 +390,8 @@ def build_plan(rows, catalog, start, strategy='urgent', reconciled=False, horizo
             if typ not in ('single','double','split','loose'): raise ValueError('Укажите тип паллетирования')
             if c.get('needsReview'): raise ValueError('Подтвердите толкование кратности в справочнике')
             common={'rowId':rid,'name':r['name'],'order':r.get('order',''),'invoice':r.get('invoice',''),
-                    'ready':ready.isoformat(),'due':due.isoformat(),'vertical':bool(c.get('vertical'))}
+                    'ready':ready.isoformat(),'due':due.isoformat(),'vertical':bool(c.get('vertical')),
+                    'urgent':bool(r.get('urgent'))}
             placement = c.get('fixation')
             if typ == 'loose' and not placement:
                 if not pallet_limiter_model(c.get('name')):

@@ -5,16 +5,32 @@ from io import BytesIO
 import re
 from openpyxl import Workbook
 from openpyxl.styles import Font,PatternFill,Alignment
+from openpyxl.styles.colors import COLOR_INDEX
 from openpyxl.worksheet.table import Table,TableStyleInfo
 from importer import workbook,parse_date,catalog_import
 from planner import article_candidates, different_product_model, number, product_name_key
 from workflow import canonical_order,clean,key,uid,validate_row,today
 
-ORDER_HEADERS=['№ заказа Комуса','Номер счета','Артикул Комуса','Артикул Промет','Наименование','Заказано, шт.','Отгрузить до','Комментарий']
+ORDER_HEADERS=['№ заказа Комуса','Номер счета','Артикул Комуса','Артикул Промет','Наименование','Заказано, шт.','Отгрузить до','Комментарий','Срочно']
 REPLY_HEADERS=['ID строки','№ заказа Комуса','Номер счета','Артикул Комуса','Артикул Промет','Наименование','Заказано, шт.','Дата подтвержденная','Дата ответа']
 
 def header(v):return re.sub(r'\s+',' ',clean(v).lower().replace('ё','е').rstrip(':'))
 def text(v):return str(int(v)) if isinstance(v,float) and v.is_integer() else clean(v)
+
+def yellow_marker(cell):
+    if cell.fill.patternType!='solid':
+        return False
+    color=cell.fill.fgColor
+    rgb=color.rgb if color.type=='rgb' else COLOR_INDEX[color.indexed] if color.type=='indexed' and color.indexed<len(COLOR_INDEX) else ''
+    return rgb[-6:].upper()=='FFFF00'
+
+def is_urgent(value):
+    marker=header(value)
+    if marker in ('да','срочно','1','yes','true','истина'):
+        return True
+    if marker in ('','нет','0','no','false','ложь'):
+        return False
+    raise ValueError('В колонке «Срочно» укажите «Да» или «Нет».')
 
 def without_pallet_split_note(name, quantity):
     """Remove a trailing quantity breakdown only when it agrees with the order."""
@@ -64,14 +80,17 @@ def parse_initial(raw,sheet,year,mode):
     aliases={'order':['№ заказа комуса','№ заказа','заказ'],'position':['№ позиции заказа','позиция'],
        'invoice':['номер счета','счет'],'name':['наименование'],'qty':['кол.','кол','количество','заказано, шт.'],
        'shipped':['уже отгружено','отгружено','уже отгружено, шт.'],'ready':['дата подтвержденная','готовность'],
-       'due':['отгрузить до'],'sku':['артикул промет'],'komusSku':['артикул комуса']}
+       'due':['отгрузить до'],'sku':['артикул промет'],'komusSku':['артикул комуса'],'urgent':['срочно']}
     idx={k:next((columns[x] for x in al if x in columns),None) for k,al in aliases.items()}
-    rows=[];errors=[];order='';invoice='';keys=set()
+    rows=[];errors=[];order='';invoice='';keys=set();urgent_order=False
     for rr in s.iter_rows(min_row=hr+1):
         def v(k):i=idx[k];return rr[i].value if i is not None and i<len(rr) else None
         if v('order') is not None:
             incoming_order=canonical_order(text(v('order')))
-            if incoming_order!=order:invoice=''
+            if incoming_order!=order:
+                invoice=''
+                urgent_order=False
+            urgent_order=urgent_order or yellow_marker(rr[idx['order']])
             order=incoming_order
         if v('invoice') is not None:invoice=text(v('invoice'))
         if not v('name'):continue
@@ -84,6 +103,10 @@ def parse_initial(raw,sheet,year,mode):
                'due':strict_date(v('due'),year,'Отгрузить до',False),'lots':[],
                'internalPosition':v('position') in (None,''),'source':f'{sheet}!{rr[0].row}','replyAsOf':''}
             ready=strict_date(v('ready'),year,'Готовность',False)
+            urgent=(is_urgent(v('urgent')) if v('urgent') not in (None,'') else
+                    urgent_order or any(yellow_marker(rr[idx[field]]) for field in ('name','qty','due','invoice')
+                                        if idx[field] is not None))
+            if urgent:r['urgent']=True
             if q<shipped:raise ValueError('Отгружено больше количества')
             if ready and q>shipped:r['lots']=[{'part':'1','qty':q-shipped,'ready':ready,'asOf':'','source':'initial'}]
             if not order:raise ValueError('Нет номера заказа: заполните его в исходном файле')
@@ -109,6 +132,7 @@ def parse_order(raw,sheet,year):
                'sku':text(g('Артикул Промет')),'name':text(g('Наименование')),'qty':number(g('Заказано, шт.'),'Заказано',False),
                'shipped':0,'due':strict_date(g('Отгрузить до'),year,'Отгрузить до'),'lots':[],'replyAsOf':'',
                'source':f'{sheet}!{line}','comment':text(g('Комментарий'))}
+            if is_urgent(g('Срочно')):r['urgent']=True
             validate_row(r);rows.append(r)
         except ValueError as e:errors.append({'line':line,'name':text(g('Наименование')),'reason':str(e)})
     return {'rows':rows,'errors':errors,'count':len(rows),'warnings':['Все новые заказы из файла добавятся к общему журналу. Номер позиции не нужен. Готовность обновляется ответом Донцовой.']}

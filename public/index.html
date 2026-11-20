@@ -108,6 +108,7 @@
       <li>
         <h3>Соберите машины</h3>
         <p>Во вкладке «Машины» укажите начало отгрузок и нажмите «Собрать машины». Проверьте состав в плане или календаре. Причины переноса указаны в блоке «Остаток и причины переноса».</p>
+        <p>Отметьте нужные позиции кнопкой «Срочно» в заказах или остатках до сборки. Чтобы вручную изменить готовый план, нажмите на паллету в схеме и выберите подходящую паллету для обмена в другой машине. При новой сборке ручные обмены заменяются расчётом.</p>
       </li>
       <li>
         <h3>Зафиксируйте фактическую отправку</h3>
@@ -150,4 +151,16 @@
 <div class="modal-footer"><button type="button" data-close="clearPlanDialog">Отмена</button><button class="primary mutation" type="submit">Сбросить план</button></div>
 </form>
 </dialog>
-<dialog id="palletDialog"><div id="palletDetail"></div><button data-close="palletDialog">Закрыть</button></dialog><script src="/app.js" defer></script></body></html>
+<dialog id="palletDialog">
+ <div id="palletDetail"></div>
+ <form id="palletExchangeForm" hidden>
+  <h3>Перенести в другую машину</h3>
+  <p>Выберите паллету того же типа для обмена. Обе машины сохранят полную загрузку.</p>
+  <label>Машина<select id="palletTargetTruck" required></select></label>
+  <label>Встречная паллета<select id="palletTargetPlace" required></select></label>
+  <p id="palletExchangeNote" class="muted"></p>
+  <p id="palletExchangeError" class="error" role="alert"></p>
+  <div class="modal-footer"><button type="button" data-close="palletDialog">Закрыть</button><button id="savePalletExchange" type="submit" class="primary mutation">Поменять паллеты</button></div>
+ </form>
+ <button id="closePalletDetail" type="button" data-close="palletDialog">Закрыть</button>
+</dialog><script src="/app.js" defer></script></body></html>

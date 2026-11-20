@@ -409,14 +409,14 @@ def rows_import(raw,sheet=None,year=None):
 def export_plan(plan):
     w=Workbook();s=w.active;s.title='Машины'
     s.append(['Машина','Дата','Рейс за день','Укладка','Сдвоенные','Одиночные','Длина мм','Основание 2 рейса'])
-    p=w.create_sheet('Расстановка');p.append(['Машина','Место','Заказ','Счёт','Наименование','Количество','Тип','ВП','Готовность','Отгрузить до','Крепление','Артикул Промет','Артикул Комуса'])
+    p=w.create_sheet('Расстановка');p.append(['Машина','Место','Заказ','Счёт','Наименование','Количество','Тип','ВП','Готовность','Отгрузить до','Крепление','Артикул Промет','Артикул Комуса','Срочно'])
     for t in plan['trucks']:
         l=t['layout'];s.append([t['id'],t['date'],t['slot'],l['id'],l['doubles'],l['singles'],l['length'],t['secondReason']])
         for i,r in enumerate(t['pallets']+t['loose'],1):
             place = 'Без отдельного места' if r['type']=='loose' else i
-            p.append([t['id'],place,r['order'],r['invoice'],r['name'],r['qty'],r['type'],'ВП' if r['vertical'] else '',r['ready'],r['due'],r.get('fixation',''),r.get('sku',''),r.get('komusSku','')])
-    r=w.create_sheet('Остаток');r.append(['Заказ','Счёт','Наименование','Количество','Причина'])
-    for x in plan['leftovers']:r.append([x['order'],x['invoice'],x['name'],x['qty'],x['reason']])
+            p.append([t['id'],place,r['order'],r['invoice'],r['name'],r['qty'],r['type'],'ВП' if r['vertical'] else '',r['ready'],r['due'],r.get('fixation',''),r.get('sku',''),r.get('komusSku',''),'Да' if r.get('urgent') else ''])
+    r=w.create_sheet('Остаток');r.append(['Заказ','Счёт','Наименование','Количество','Причина','Срочно'])
+    for x in plan['leftovers']:r.append([x['order'],x['invoice'],x['name'],x['qty'],x['reason'],'Да' if x.get('urgent') else ''])
     n=w.create_sheet('Примечания');n.append(['Условия расчёта']);n.append([plan['notice']]);n.append(['Горизонт, дней',plan['horizon']]);n.append(['Критерий полной машины: строго одна из 12 утверждённых укладок.'])
     return finish_export(w)
 

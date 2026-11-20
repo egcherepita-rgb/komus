@@ -9,7 +9,7 @@ from importer import (calculate_pallets, catalog_import, export_pallets, export_
                       moscow_articles_import, moscow_catalog_import, pallet_template)
 import ledger_store
 from workflow import empty_state,public_state,make_plan,apply_import,update_row,dispatch,now,today,canonical_order,validate_row
-from workflow import clear_plan, transition_row
+from workflow import clear_plan, exchange_pallets, set_order_urgency, transition_row
 from import_v2 import parse_initial,parse_order,parse_response,template_file
 from planner import article_key, number, pallet_limiter_model, product_name_key
 
@@ -251,6 +251,12 @@ class Handler(BaseHTTPRequestHandler):
                 rev,state,result=ledger_store.mutate(DATA,expected,lambda s:transition_row(
                     s,data['id'],data['operation'],data['quantity'],data.get('actualDate'),
                     rebuild_plan=data.get('fromPlan') is True))
+            elif path=='/api/v2/row-urgency':
+                rev,state,result=ledger_store.mutate(DATA,expected,lambda s:set_order_urgency(s,data['id'],data['urgent']))
+            elif path=='/api/v2/pallet-exchange':
+                rev,state,result=ledger_store.mutate(DATA,expected,lambda s:exchange_pallets(
+                    s,data['planId'],number(data['sourceId'],'Машина',False),number(data['sourceIndex'],'Место'),
+                    number(data['targetId'],'Машина',False),number(data['targetIndex'],'Место')))
             elif path=='/api/v2/reconcile':
                 def reconcile(s):
                     for r in s['rows']:validate_row(r)

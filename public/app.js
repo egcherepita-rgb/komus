@@ -8,7 +8,7 @@ const types={single:'Красная 0,5',double:'Чёрная 1',split:'Крас
 const importNames={initial:'Первоначальный файл отгрузок',catalog:'Кратность Тула',moscow:'Кратность Москвы','moscow-articles':'Артикулы Москвы',order:'Новый заказ Комуса',response:'Ответ Донцовой'};
 let state=null,revision=0,busy=false,month=today().slice(0,7),uploadKind='',uploadToken=null,uploadGeneration=0,editing=null,dispatching=null;
 let layouts=[],layoutsLoading=null;
-let rowTransition=null,planToClear=null;
+let rowTransition=null,planToClear=null,palletExchange=null;
 let palletRows=null,palletsExporting=false;
 function banner(message,error=false){$('banner').hidden=!message;$('banner').textContent=message||'';$('banner').classList.toggle('error',error);}
 function lock(value){busy=value;document.querySelectorAll('.mutation').forEach(b=>b.disabled=value||readOnly);if(!value&&$('uploadDialog').open)$('applyImport').disabled=readOnly||!uploadToken;}
@@ -91,7 +91,8 @@ $('exportPallets').onclick=async()=>{
 function fileTable(files){return table(['Тип','Файл / лист','Когда загружен','Строк','Исходник'],files.slice().reverse().map(f=>[esc(importNames[f.kind]||f.kind),esc(f.filename)+(f.sheet?`<small class="row-note">${esc(f.sheet)}</small>`:''),esc(datefmt(f.at)),fmt(f.lines),`<button class="compact-action" data-download="/api/v2/source?sha=${esc(f.sha)}">Скачать</button>`]));}
 function sumTruck(t){return [...t.pallets,...t.loose].reduce((s,p)=>s+p.qty,0);}
 function summary(t){const map=new Map();for(const p of [...t.pallets,...t.loose]){const k=p.rowId;const item=map.get(k)||{...p,qty:0,places:0,partialCount:0};item.qty+=p.qty;item.places+=p.type==='loose'?0:1;item.partialCount+=p.partial?1:0;map.set(k,item);}return [...map.values()];}
-function pallet(p,i,t,history){return `<button class="pallet ${p.type==='double'?'double':''}" data-pallet="${i}" data-truck="${t.id}" ${history?`data-shipment="${t.shipmentId}"`:''} title="${esc(p.name+' · '+p.qty+' шт. · заказ '+p.order)}">${i+1}<small>${p.qty} шт.${p.vertical?' ВП':''}</small></button>`;}
+function urgentBadge(row){return row?.urgent?' <span class="tag urgent-tag">Срочно</span>':'';}
+function pallet(p,i,t,history){return `<button class="pallet ${p.type==='double'?'double':''} ${p.urgent?'urgent-pallet':''}" data-pallet="${i}" data-truck="${t.id}" ${history?`data-shipment="${t.shipmentId}"`:''} title="${esc(p.name+' · '+p.qty+' шт. · заказ '+p.order)}">${i+1}<small>${p.qty} шт.${p.vertical?' ВП':''}${p.urgent?' · Срочно':''}</small></button>`;}
 function diagram(t,history){let i=0,s='';for(let d=0;d<t.layout.doubles;d++){s+=`<div class="pallet-column double" data-width="1200">${pallet(t.pallets[i],i,t,history)}</div>`;i++;}for(let d=0;d<t.layout.singles;d+=2){s+=`<div class="pallet-column" data-width="1000">${pallet(t.pallets[i],i,t,history)}${pallet(t.pallets[i+1],i+1,t,history)}</div>`;i+=2;}return `<div class="diagram-scroll"><div class="diagram">${s}</div></div>`;}
 function sizes(){document.querySelectorAll('[data-width]').forEach(n=>n.style.width=(Number(n.dataset.width)/13500*100)+'%');}
 function layoutDiagram(l){
@@ -108,7 +109,7 @@ async function loadLayouts(){
  layoutsLoading=(async()=>{try{const data=await request('layouts');if(!Array.isArray(data)||data.length!==12)throw Error('Не удалось получить все 12 схем укладки.');layouts=data;renderLayouts();$('layoutStatus').textContent='Все 12 вариантов используются при автоматической сборке машин.';return layouts;}catch(e){$('layoutStatus').textContent='Не удалось загрузить схемы: '+e.message;$('retryLayouts').hidden=false;throw e;}finally{layoutsLoading=null;}})();return layoutsLoading;
 }
 async function openLayout(id){tab('layouts');await loadLayouts();layouts.forEach(l=>$('layout-'+l.id).classList.toggle('selected',l.id===id));const card=$('layout-'+id);if(card){card.scrollIntoView({behavior:'smooth',block:'center'});card.focus({preventScroll:true});}}
-function truckHtml(t,history=false,match=null){const positions=match?summary(t).filter(match):summary(t);return `<article class="panel truck ${history?'shipment':''}"><div class="truck-top"><div class="truck-name"><span class="truck-number">${String(t.id).padStart(2,'0')}</span><div><h3>Машина № ${t.id} <span class="tag">${history?'Отгружена':'Полная укладка'}</span></h3><p>${datefmt(history?t.actualDate:t.date)} · Рейс ${t.slot} · Схема ${t.layout.id}${t.secondReason?' · '+esc(t.secondReason):''}</p></div></div><button class="tag purple layout-link" data-layout="${t.layout.id}" aria-label="Показать схему укладки № ${t.layout.id}">Схема № ${t.layout.id} · ${t.layout.doubles} × 1 + ${t.layout.singles} × 0,5 ↗</button></div>${diagram(t,history)}<div class="diagram-caption"><span>КАБИНА ← · Нажмите паллету, чтобы открыть товар и заказ</span><span>${(t.layout.length/1000).toFixed(1)} / 13,5 м</span></div><details open><summary>${match?'Совпадения':'Состав'} · ${positions.length} поз. · ${fmt(match?positions.reduce((sum,p)=>sum+p.qty,0):sumTruck(t))} шт.</summary><div class="table-wrap">${table(['Заказ','Счёт','Товар / артикул','Количество','Мест','Особенности'],positions.map(p=>[esc(p.order),esc(p.invoice),esc(p.name)+`<small class="row-note">${esc([p.sku,p.komusSku].filter(Boolean).join(' · '))}</small>`,`<strong>${fmt(p.qty)} шт.</strong>`,String(p.places),[p.vertical?'ВП':'',p.partialCount?'Неполных паллет: '+p.partialCount:'',p.type==='loose'?'Без места: '+esc(p.fixation):''].filter(Boolean).join(' · ')]))}</div></details>${history?`<p class="muted">Фактически отправлено ${datefmt(t.actualDate)}. В остатках заказов уже учтено.</p>`:`<div class="truck-actions"><span>Планирование не списывает товар. Отмечайте только после реальной отправки.</span><button class="mutation" data-dispatch="${t.id}">Отметить отгруженной</button></div>`}</article>`;}
+function truckHtml(t,history=false,match=null){const positions=match?summary(t).filter(match):summary(t);return `<article class="panel truck ${history?'shipment':''}"><div class="truck-top"><div class="truck-name"><span class="truck-number">${String(t.id).padStart(2,'0')}</span><div><h3>Машина № ${t.id} <span class="tag">${history?'Отгружена':'Полная укладка'}</span></h3><p>${datefmt(history?t.actualDate:t.date)} · Рейс ${t.slot} · Схема ${t.layout.id}${t.secondReason?' · '+esc(t.secondReason):''}</p></div></div><button class="tag purple layout-link" data-layout="${t.layout.id}" aria-label="Показать схему укладки № ${t.layout.id}">Схема № ${t.layout.id} · ${t.layout.doubles} × 1 + ${t.layout.singles} × 0,5 ↗</button></div>${diagram(t,history)}<div class="diagram-caption"><span>КАБИНА ← · ${history?'Нажмите паллету, чтобы открыть товар и заказ':'Нажмите паллету, чтобы открыть детали или перенести её'}</span><span>${(t.layout.length/1000).toFixed(1)} / 13,5 м</span></div><details open><summary>${match?'Совпадения':'Состав'} · ${positions.length} поз. · ${fmt(match?positions.reduce((sum,p)=>sum+p.qty,0):sumTruck(t))} шт.</summary><div class="table-wrap">${table(['Заказ','Счёт','Товар / артикул','Количество','Мест','Особенности'],positions.map(p=>[esc(p.order),esc(p.invoice),esc(p.name)+urgentBadge(p)+`<small class="row-note">${esc([p.sku,p.komusSku].filter(Boolean).join(' · '))}</small>`,`<strong>${fmt(p.qty)} шт.</strong>`,String(p.places),[p.vertical?'ВП':'',p.partialCount?'Неполных паллет: '+p.partialCount:'',p.type==='loose'?'Без места: '+esc(p.fixation):''].filter(Boolean).join(' · ')]))}</div></details>${history?`<p class="muted">Фактически отправлено ${datefmt(t.actualDate)}. В остатках заказов уже учтено.</p>`:`<div class="truck-actions"><span>Планирование не списывает товар. Отмечайте только после реальной отправки.</span><button class="mutation" data-dispatch="${t.id}">Отметить отгруженной</button></div>`}</article>`;}
 function renderPlan(){const p=state.plan;$('clearPlan').hidden=!p||readOnly;$('statTrucks').textContent=p?p.trucks.length:'—';$('statRemaining').textContent=fmt(state.totals.remaining);$('statConfirmed').textContent=fmt(state.totals.confirmed);$('statShipped').textContent=fmt(state.totals.shipped);$('start').value=state.settings.start;$('strategy').value=state.settings.strategy;
  $('setupSteps').innerHTML=[['initial','1. Первоначальный файл',state.bootstrap||state.rows.length?'Журнал сохранён':'Загрузить один раз',!!state.bootstrap||!!state.rows.length],['catalog','2. Кратность Тула',state.catalog.length?state.catalog.length+' товаров · хранится постоянно':'Загрузить справочник',!!state.catalog.length],['orders','3. Новые заказы',state.orders.length+' заказов · добавляются к журналу',!!state.orders.length],['responses','4. Ответы Донцовой',state.totals.confirmed?fmt(state.totals.confirmed)+' шт. с готовностью':'Загрузить подтверждения',!!state.totals.confirmed]].map(([dest,title,note,done])=>`<button class="setup-card ${done?'done':'todo'}" data-tab="${dest}"><strong>${title}</strong><span>${note}</span></button>`).join('');
  $('reconcileBox').hidden=state.reconciled||!state.rows.length;$('exportPlan').disabled=!p||!p.wholePalletsOnly||p.readinessMode!=='position';$('printPlan').disabled=!p||!p.wholePalletsOnly||p.readinessMode!=='position';
@@ -140,7 +141,7 @@ function renderLeftovers(){
  $('leftoverIssues').innerHTML=problems.length?`<div class="preview-errors"><strong>Требуют проверки: ${problems.length}</strong><br>${problems.map(x=>esc(x.name)+': '+esc(x.reason)).join('<br>')}</div>`:'';
  $('leftoverTable').innerHTML=table(['Заказ','Счёт','Товар','Количество','Причина','Действие'],rows.map(entry=>{
   const row=byId.get(entry.rowId);
-  return [esc(entry.order),esc(entry.invoice),esc(entry.name),fmt(entry.qty),esc(entry.reason),row?orderRowActions(row,entry.qty):''];
+  return [esc(entry.order),esc(entry.invoice),esc(entry.name)+urgentBadge(row),fmt(entry.qty),esc(entry.reason),row?orderRowActions(row,entry.qty):''];
  }),leftoverQuery.trim()?'По запросу ничего не найдено.':'Весь подтверждённый товар распределён.');
  lock(busy);
 }
@@ -149,7 +150,7 @@ function renderOrders(){const old=$('orderSelect').value;$('orderSelect').innerH
 function filterOrders(){if(!state)return;const selected=$('orderSelect').value,q=$('orderSearch').value.trim().toLowerCase();const rows=state.rows.filter(r=>(!selected||r.order===selected)&&[r.order,r.invoice,r.name,r.sku,r.komusSku].join(' ').toLowerCase().includes(q));
  $('downloadOrderReply').disabled=!selected||readOnly;
  $('ordersSummary').innerHTML=state.orders.filter(o=>!selected||o.order===selected).map(o=>`<div class="order-card"><strong>Заказ ${esc(o.order)}</strong><span>${o.lines} поз. · осталось ${fmt(o.remaining)} шт.</span><p>С датой готовности: ${fmt(o.confirmed)} шт.<br>Отгружено: ${fmt(o.shipped)} шт.<br>Срок: ${datefmt(o.due)}</p>${o.issues?`<span class="tag amber">Проверить: ${o.issues}</span>`:''}</div>`).join('');
- $('ordersTable').innerHTML=table(['Заказ','Счёт','Товар / артикулы','Заказано','Отгружено','Остаток','Дата готовности всей позиции','Отгрузить до','Действие'],rows.map(r=>[esc(r.order),esc(r.invoice),esc(r.name)+`<small class="row-note">Промет: ${esc(r.sku||'—')} · Комус: ${esc(r.komusSku||'—')}</small>`,fmt(r.qty),fmt(r.shipped),fmt(r.qty-r.shipped)+(r.reserved?`<small class="row-note">В готовой машине: ${fmt(r.reserved)} шт.</small>`:''),r.ready?datefmt(r.ready):`<span class="tag amber">${r.readinessNeedsReview?'Уточнить одну дату позиции':'Нет даты готовности'}</span>`,datefmt(r.due),orderRowActions(r)]),'Заказов пока нет. Загрузите первоначальный файл или новый заказ по шаблону.');if(readOnly)lock(false);
+ $('ordersTable').innerHTML=table(['Заказ','Счёт','Товар / артикулы','Заказано','Отгружено','Остаток','Дата готовности всей позиции','Отгрузить до','Действие'],rows.map(r=>[esc(r.order),esc(r.invoice),esc(r.name)+urgentBadge(r)+`<small class="row-note">Промет: ${esc(r.sku||'—')} · Комус: ${esc(r.komusSku||'—')}</small>`,fmt(r.qty),fmt(r.shipped),fmt(r.qty-r.shipped)+(r.reserved?`<small class="row-note">В готовой машине: ${fmt(r.reserved)} шт.</small>`:''),r.ready?datefmt(r.ready):`<span class="tag amber">${r.readinessNeedsReview?'Уточнить одну дату позиции':'Нет даты готовности'}</span>`,datefmt(r.due),orderRowActions(r)]),'Заказов пока нет. Загрузите первоначальный файл или новый заказ по шаблону.');if(readOnly)lock(false);
 }
 function orderRowActions(row,leftoverQuantity){
  const id=esc(row.id);
@@ -162,6 +163,7 @@ function orderRowActions(row,leftoverQuantity){
   <button class="compact-action mutation" data-ship-row="${id}"${attributes}>Отгружено</button>
   <button class="compact-action mutation" data-reserve-row="${id}"${attributes}>${row.reserved?'Изменить количество в машине':'В готовой машине'}</button>
   ${release}
+  <button class="compact-action mutation" data-urgency-row="${id}" data-urgent="${!row.urgent}">${row.urgent?'Снять срочность':'Срочно'}</button>
   ${edit}
  </div>`;
 }
@@ -406,6 +408,56 @@ $('clearPlanForm').onsubmit=async event=>{
 };
 function shiftMonth(delta){const[y,m]=month.split('-').map(Number),d=new Date(y,m-1+delta,1,12);month=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');renderCalendar();}$('prevMonth').onclick=()=>shiftMonth(-1);$('nextMonth').onclick=()=>shiftMonth(1);$('printCalendar').onclick=$('printPlan').onclick=()=>window.print();
 $('printLayouts').onclick=()=>window.print();$('retryLayouts').onclick=()=>loadLayouts().catch(()=>{});
+function openPallet(truckId,index,shipmentId){
+ const truck=shipmentId?state.shipments.find(t=>t.shipmentId===shipmentId):state.plan?.trucks.find(t=>t.id===truckId);
+ const pallet=truck?.pallets[index];
+ if(!pallet)return;
+ $('palletDetail').innerHTML=`<span class="eyebrow">МАШИНА № ${truck.id} · МЕСТО ${index+1}</span><h2>${esc(pallet.name)}${urgentBadge(pallet)}</h2>
+  <p><strong>${fmt(pallet.qty)} шт.</strong>${pallet.vertical?' · ВП':''}</p>
+  <p>Заказ: ${esc(pallet.order)}<br>Счёт: ${esc(pallet.invoice)}<br>Артикул: ${esc(pallet.sku||pallet.komusSku||'—')}</p>
+  <p>Готовность: ${datefmt(pallet.ready)}<br>Отгрузить до: ${datefmt(pallet.due)}</p>`;
+ const canExchange=!shipmentId&&!readOnly&&!pallet.partial;
+ $('palletExchangeForm').hidden=!canExchange;
+ $('closePalletDetail').hidden=canExchange;
+ if(canExchange){
+  const targets=state.plan.trucks.filter(t=>t.id!==truck.id&&pallet.ready<=t.date&&
+   t.pallets.some(p=>p.type===pallet.type&&!p.partial&&p.ready<=truck.date));
+  palletExchange={truck,index,pallet,targets,planId:state.plan.id,revision};
+  $('palletTargetTruck').innerHTML='<option value="">Выберите машину</option>'+targets.map(t=>
+   `<option value="${t.id}">№ ${t.id} · ${datefmt(t.date)}</option>`).join('');
+  $('palletTargetTruck').value='';
+  $('palletExchangeError').textContent='';
+  $('palletTargetTruck').onchange();
+ }
+ $('palletDialog').showModal();
+}
+$('palletTargetTruck').onchange=()=>{
+ const target=palletExchange.targets.find(t=>t.id===Number($('palletTargetTruck').value));
+ const options=target?.pallets.map((p,index)=>({p,index})).filter(({p})=>
+  p.type===palletExchange.pallet.type&&!p.partial&&p.ready<=palletExchange.truck.date)||[];
+ $('palletTargetPlace').innerHTML='<option value="">Выберите паллету</option>'+options.map(({p,index})=>
+  `<option value="${index}">Место ${index+1} · ${esc(p.name)} · ${fmt(p.qty)} шт. · заказ ${esc(p.order)}</option>`).join('');
+ $('palletTargetPlace').value='';
+ $('palletExchangeNote').textContent=palletExchange.targets.length?'':'Нет другой машины с подходящей паллетой и датой готовности.';
+};
+$('palletTargetPlace').onchange=()=>{
+ const target=palletExchange.targets.find(t=>t.id===Number($('palletTargetTruck').value));
+ const place=$('palletTargetPlace').value;
+ const pallet=place!==''?target?.pallets[Number(place)]:null;
+ const late=pallet&&(pallet.due<palletExchange.truck.date||palletExchange.pallet.due<target.date);
+ $('palletExchangeNote').textContent=late?'После обмена одна или обе позиции могут выйти за срок отгрузки.':'';
+};
+$('palletExchangeForm').onsubmit=async event=>{
+ event.preventDefault();
+ if(busy||!palletExchange||readOnly)return;
+ const {truck,index,planId}=palletExchange;
+ const targetId=$('palletTargetTruck').value,targetIndex=$('palletTargetPlace').value;
+ if(!targetId||targetIndex==='')return;
+ try{
+  if(palletExchange.revision!==revision)throw Error('План изменился. Откройте паллету заново.');
+  if(await action('pallet-exchange',{planId,sourceId:truck.id,sourceIndex:index,targetId:Number(targetId),targetIndex:Number(targetIndex)}))$('palletDialog').close();
+ }catch(error){$('palletExchangeError').textContent=error.message;}
+};
 document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b||b.disabled)return;
  if(b.dataset.layout)openLayout(Number(b.dataset.layout)).catch(()=>{});
  if(b.dataset.tab)tab(b.dataset.tab);if(b.dataset.close)$(b.dataset.close).close();if(b.dataset.download)download(b.dataset.download);if(b.dataset.import)showUpload(b.dataset.import);if(b.dataset.editRow)editRow(b.dataset.editRow);if(b.dataset.editCatalog!==undefined)editCatalog(Number(b.dataset.editCatalog),b.dataset.catalogSource);
@@ -414,6 +466,7 @@ document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b||
  if(b.dataset.releaseRow)openRowTransition(b.dataset.releaseRow,'release',b.dataset.leftoverQuantity);
  if(b.dataset.dispatch){dispatching=Number(b.dataset.dispatch);const t=state.plan.trucks.find(t=>t.id===dispatching);$('dispatchDescription').textContent=`Машина № ${t.id}: ${fmt(sumTruck(t))} шт., ${summary(t).length} позиций. Плановая дата ${datefmt(t.date)}.`;$('actualDate').value=today();$('actualDate').max=today();$('dispatchError').textContent='';$('dispatchDialog').showModal();}
  if(b.dataset.calendar||b.dataset.historyCard){const hist=!!b.dataset.historyCard,t=hist?state.shipments.find(t=>t.shipmentId===b.dataset.historyCard):state.plan.trucks.find(t=>t.id===Number(b.dataset.calendar));$('calendarDetails').innerHTML=truckHtml(t,hist);sizes();lock(busy);$('calendarDetails').scrollIntoView({behavior:'smooth',block:'start'});}
- if(b.dataset.pallet!==undefined){const t=b.dataset.shipment?state.shipments.find(t=>t.shipmentId===b.dataset.shipment):state.plan.trucks.find(t=>t.id===Number(b.dataset.truck));const p=t.pallets[Number(b.dataset.pallet)];$('palletDetail').innerHTML=`<span class="eyebrow">МАШИНА № ${t.id} · МЕСТО ${Number(b.dataset.pallet)+1}</span><h2>${esc(p.name)}</h2><p><strong>${fmt(p.qty)} шт.</strong>${p.vertical?' · ВП':''}</p><p>Заказ: ${esc(p.order)}<br>Счёт: ${esc(p.invoice)}<br>Артикул: ${esc(p.sku||p.komusSku||'—')}</p><p>Готовность: ${datefmt(p.ready)}<br>Отгрузить до: ${datefmt(p.due)}</p>${p.partial?'<p class="tag amber">Паллета заполнена частично, занимает целое место.</p>':''}`;$('palletDialog').showModal();}
+ if(b.dataset.urgencyRow)action('row-urgency',{id:b.dataset.urgencyRow,urgent:b.dataset.urgent==='true'}).catch(error=>banner(error.message,true));
+ if(b.dataset.pallet!==undefined)openPallet(Number(b.dataset.truck),Number(b.dataset.pallet),b.dataset.shipment);
 });
 boot().catch(e=>{$('loginError').textContent=e.message;banner(e.message,true);});
