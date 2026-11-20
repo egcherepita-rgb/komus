@@ -160,7 +160,7 @@ def update_row(state,rid,changes):
     if any(x['id']!=rid and key(x.get('order'),x.get('position'))==key(candidate['order'],candidate['position']) for x in state['rows']):raise ValueError('Такая позиция этого заказа уже существует')
     r.update(candidate);state['reconciled']=False;state['plan']=None
 
-def transition_row(state, row_id, operation, quantity, actual_date=None):
+def transition_row(state, row_id, operation, quantity, actual_date=None, rebuild_plan=False):
     row=next((row for row in state['rows'] if row['id']==row_id),None)
     if row is None:raise ValueError('Позиция не найдена')
     ordered,shipped=validate_row(row)
@@ -183,13 +183,18 @@ def transition_row(state, row_id, operation, quantity, actual_date=None):
         row.update(shipped=shipped+quantity,reserved=max(0,reserved-quantity),lots=lots)
         state.setdefault('manualShipments',[]).append({
             'rowId':row_id,'order':row['order'],'invoice':row.get('invoice',''),'name':row['name'],
+            'sku':row.get('sku',''),'komusSku':row.get('komusSku',''),
             'qty':quantity,'actualDate':actual.isoformat(),'markedAt':now()
         })
         message='Позиция отмечена отгруженной. Остаток уменьшен.' if quantity==remaining else 'Частичная отгрузка сохранена. Остаток уменьшен.'
         if readiness_cleared:message+=' Для остатка нужна одна подтверждённая дата готовности.'
     if state['plan']:
-        state['plan']=None
-        message+=' Текущий план сброшен. Соберите машины заново.'
+        if rebuild_plan:
+            make_plan(state)
+            message+=' План машин пересчитан.'
+        else:
+            state['plan']=None
+            message+=' Текущий план сброшен. Соберите машины заново.'
     return {'message':message}
 
 def limit_lots(lots, quantity):

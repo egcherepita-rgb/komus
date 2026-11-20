@@ -154,6 +154,39 @@ test('history groups manual shipments by date and displays known trucks separate
   assert.ok(html.indexOf('19 ноября') < html.indexOf('18 ноября'));
 });
 
+test('shipment history searches name, both articles, order and invoice, including older manual shipments', () => {
+  const c = client({ upload: false });
+  c.run(`state={rows:[{id:'old',sku:'P-888',komusSku:'K-444'}],shipments:[
+    {id:3,actualDate:'2026-11-19',slot:1,layout:{id:1,doubles:0,singles:0,length:0},pallets:[],
+     loose:[{rowId:'a',order:'45001',invoice:'50501',name:'Стеллаж',sku:'P-11',komusSku:'K-22',qty:1}]}
+  ],manualShipments:[{rowId:'old',order:'45002',invoice:'50502',name:'Ключница',qty:2,actualDate:'2026-11-18'}]}`);
+  for (const [query, expected, absent] of [
+    ['стеллаж', 'Стеллаж', 'Ключница'], ['p-11', 'Стеллаж', 'Ключница'],
+    ['K-22', 'Стеллаж', 'Ключница'], ['45001', 'Стеллаж', 'Ключница'],
+    ['50501', 'Стеллаж', 'Ключница'], ['K-444', 'Ключница', 'Стеллаж'],
+  ]) {
+    c.element('historySearch').value = query;
+    c.run("$('historySearch').oninput()");
+    assert.ok(c.element('shipments').innerHTML.includes(expected));
+    assert.ok(!c.element('shipments').innerHTML.includes(absent));
+  }
+});
+
+test('leftover searches the journal article and uses the same shipment dialog', async () => {
+  const c = client({ upload: false });
+  c.run(`state={rows:[{id:'a',order:'45001',name:'Стеллаж',sku:'P-11',qty:40,shipped:10},{id:'b',name:'Ключница',qty:10,shipped:0}],
+    plan:{issues:[],leftovers:[{rowId:'a',name:'Стеллаж',qty:5,reason:'Перенос'},{rowId:'b',name:'Ключница',qty:10,reason:'Перенос'}]}};
+    leftoverQuery='p-11';revision=4;renderLeftovers();render=()=>{}`);
+  assert.match(c.element('leftoverTable').innerHTML, /Стеллаж/);
+  assert.doesNotMatch(c.element('leftoverTable').innerHTML, /Ключница/);
+  assert.match(c.element('leftoverTable').innerHTML, /data-ship-row="a" data-leftover-quantity="5"/);
+  c.click({ shipRow: 'a', leftoverQuantity: '5' });
+  assert.equal(c.element('rowTransitionQty').value,5);
+  c.replies.push({ revision: 5, state: {}, result: {} });
+  await c.run("$('rowTransitionForm').onsubmit({preventDefault(){}})");
+  assert.equal(JSON.parse(c.calls[0].options.body).fromPlan,true);
+});
+
 test('manual shipment uses the quantity for this shipment and confirms before saving', async () => {
   const c = client({ upload: false });
   c.run("state={rows:[{id:'row1',order:'QA-1',name:'Товар',qty:50,shipped:10,reserved:20}]}; revision=4; render=()=>{}");

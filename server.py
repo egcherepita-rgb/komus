@@ -11,7 +11,7 @@ import ledger_store
 from workflow import empty_state,public_state,make_plan,apply_import,update_row,dispatch,now,today,canonical_order,validate_row
 from workflow import clear_plan, transition_row
 from import_v2 import parse_initial,parse_order,parse_response,template_file
-from planner import number, pallet_limiter_model
+from planner import article_key, number, pallet_limiter_model, product_name_key
 
 ROOT=Path(__file__).resolve().parent
 DATA=Path(os.getenv('DATA_DIR',str(ROOT/'data')))
@@ -20,6 +20,46 @@ PASSWORD=os.getenv('APP_PASSWORD','')
 SESSIONS={};ATTEMPTS={};LOCK=threading.Lock()
 
 def db(): return ledger_store.connect(DATA)
+
+def edit_catalog_row(state, data):
+    keys={'tula':'catalog','moscow':'moscowCatalog'}
+    source=data.get('source','tula')
+    destination=data.get('destination',source)
+    if source not in keys or destination not in keys:
+        raise ValueError('Укажите площадку Тула или Москва.')
+    rows=state.setdefault(keys[source],[])
+    target=state.setdefault(keys[destination],[])
+    index=number(data['index'],'Строка')
+    if index>=len(rows):
+        raise ValueError('Строка справочника не найдена.')
+    previous=rows[index]
+    item=dict(data['item'])
+    item['name']=str(item.get('name') or '').strip()
+    if not product_name_key(item['name']):
+        raise ValueError('Укажите наименование товара.')
+    if destination=='tula':
+        if item.get('type') not in ('single','double','split','loose'):
+            raise ValueError('Для Тулы выберите тип паллеты.')
+        item['capacity']=number(item.get('capacity',0),'Кратность',allow_zero=False if source=='moscow' else bool(item.get('needsReview')))
+        if item['type']=='split' and (source=='moscow' or not item.get('needsReview')) and item['capacity']%2:
+            raise ValueError('Числовая кратность красной 1 должна делиться на 2.')
+        if source!=destination or any(item.get(field)!=previous.get(field) for field in ('type','capacity')):
+            item['original']=str(item['capacity'])
+    if source!=destination:
+        if any((product_name_key(other['name'])==product_name_key(item['name'])
+                or any(article_key(item.get(field)) and article_key(other.get(field))==article_key(item[field])
+                       for field in ('sku','komusSku'))) for other in target):
+            raise ValueError('На выбранной площадке уже есть позиция с этим наименованием или артикулом.')
+        rows.pop(index)
+        target.append(item)
+    else:
+        rows[index]=item
+    if 'tula' in (source,destination):
+        state['catalogUpdated']=now()
+        state['plan']=None
+    if 'moscow' in (source,destination):
+        state['moscowCatalogUpdated']=now()
+    return {'message':'Площадка изменена. Соберите машины заново.' if source!=destination else 'Кратность сохранена.'}
 
 def demo():
     state=empty_state();state['bootstrap']={'filename':'Демонстрационный журнал','at':now()}
@@ -81,7 +121,8 @@ def restore_pallet_limiters(state):
     uploaded = ledger_store.source(DATA,latest['sha'])
     if not uploaded:
         return
-    existing_models = {pallet_limiter_model(item.get('name')) for item in state['catalog']}
+    existing_models = {pallet_limiter_model(item.get('name'))
+                       for item in (*state['catalog'], *state.get('moscowCatalog',[]))}
     existing_sources = {item.get('source') for item in state['catalog']}
     for item in catalog_import(uploaded[1])['catalog']:
         model = pallet_limiter_model(item['name'])
@@ -208,7 +249,8 @@ class Handler(BaseHTTPRequestHandler):
                 rev,state,result=ledger_store.mutate(DATA,expected,lambda s:update_row(s,data['id'],data['changes']))
             elif path=='/api/v2/row-transition':
                 rev,state,result=ledger_store.mutate(DATA,expected,lambda s:transition_row(
-                    s,data['id'],data['operation'],data['quantity'],data.get('actualDate')))
+                    s,data['id'],data['operation'],data['quantity'],data.get('actualDate'),
+                    rebuild_plan=data.get('fromPlan') is True))
             elif path=='/api/v2/reconcile':
                 def reconcile(s):
                     for r in s['rows']:validate_row(r)
@@ -216,15 +258,7 @@ class Handler(BaseHTTPRequestHandler):
                     return {'message':'Сверка первоначальных остатков подтверждена.'}
                 rev,state,result=ledger_store.mutate(DATA,expected,reconcile)
             elif path=='/api/v2/catalog-row':
-                def catalog_row(s):
-                    i=number(data['index'],'Строка');item=dict(data['item'])
-                    if i>=len(s['catalog']):raise ValueError('Строка справочника не найдена')
-                    if not item.get('name') or item.get('type') not in ('single','double','split','loose'):raise ValueError('Проверьте товар и тип паллеты')
-                    item['capacity']=number(item.get('capacity',0),'Кратность')
-                    if not item.get('needsReview') and not item['capacity']:raise ValueError('Укажите кратность отгрузки, в том числе для груза без отдельного места')
-                    if item['type']=='split' and not item.get('needsReview') and item['capacity']%2:raise ValueError('Числовая кратность красной 1 должна делиться на 2')
-                    s['catalog'][i]=item;s['catalogUpdated']=now();s['plan']=None
-                rev,state,result=ledger_store.mutate(DATA,expected,catalog_row)
+                rev,state,result=ledger_store.mutate(DATA,expected,lambda s:edit_catalog_row(s,data))
             elif path=='/api/v2/build':
                 def build(s):
                     start=data.get('start') or today();date.fromisoformat(start)

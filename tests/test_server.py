@@ -325,6 +325,45 @@ class ServerTests(unittest.TestCase):
         self.assertIsNone(after['plan'])
         for key in ('rows','catalog','shipments','manualShipments','reconciled'):
             self.assertEqual(after[key],sent['state'][key])
+    def test_catalog_site_move_controls_whether_item_is_included_in_the_plan(self):
+        client = self.client()
+        state = server.demo()
+        state['moscowCatalog']=[{'name':'Московская позиция','original':'10','sku':'001-P'}]
+        state['rows'][0].update(name='Московская позиция',sku='001-P')
+        rev, _, _ = ledger_store.mutate(server.DATA,0,lambda current:current.update(state))
+        move={'source':'moscow','destination':'tula','index':0,'revision':rev,
+              'item':{'name':'Московская позиция','sku':'001-P','capacity':10}}
+        with self.assertRaises(urllib.error.HTTPError) as ex:
+            self.request(client,'/api/v2/catalog-row',move)
+        self.assertEqual(ex.exception.code,400)
+        move['item']['type']='single'
+        moved=json.load(self.request(client,'/api/v2/catalog-row',move))
+        self.assertFalse(moved['state']['moscowCatalog'])
+        built=json.load(self.request(client,'/api/v2/build',{'revision':moved['revision']}))
+        self.assertTrue(any(p['rowId']=='demo1' for t in built['state']['plan']['trucks'] for p in t['pallets']))
+        index=next(i for i,row in enumerate(built['state']['catalog']) if row.get('sku')=='001-P')
+        restored=json.load(self.request(client,'/api/v2/catalog-row',dict(move,index=index,source='tula',destination='moscow',
+                                                                          revision=built['revision'])))
+        self.assertEqual(restored['state']['moscowCatalog'][0]['sku'],'001-P')
+        rebuilt=json.load(self.request(client,'/api/v2/build',{'revision':restored['revision']}))
+        self.assertFalse(any(p['rowId']=='demo1' for t in rebuilt['state']['plan']['trucks'] for p in t['pallets']))
+
+    def test_leftover_actions_change_the_order_history_and_refresh_the_plan(self):
+        client=self.client()
+        state=server.demo()
+        state['rows'][2].update(sku='P-11',komusSku='K-22')
+        rev,_,_=ledger_store.mutate(server.DATA,0,lambda current:current.update(state))
+        data={'id':'demo3','operation':'reserve','quantity':20,'revision':rev,'fromPlan':True}
+        reserved=json.load(self.request(client,'/api/v2/row-transition',data))
+        self.assertEqual(reserved['state']['rows'][2]['reserved'],20)
+        self.assertTrue(any(r['rowId']=='demo3' and r['reason'].startswith('В готовой машине') for r in reserved['state']['plan']['leftovers']))
+        data.update(operation='ship',quantity=20,actualDate='2026-11-17',revision=reserved['revision'])
+        shipped=json.load(self.request(client,'/api/v2/row-transition',data))['state']
+        self.assertEqual(shipped['rows'][2]['shipped'],20)
+        self.assertEqual(shipped['rows'][2]['reserved'],0)
+        self.assertEqual(shipped['manualShipments'][0]['sku'],'P-11')
+        self.assertEqual(sum(r['qty'] for r in shipped['plan']['leftovers'] if r['rowId']=='demo3'),40)
+
     def test_readiness_build_dispatch_and_persistent_remaining_via_http(self):
         c=self.client();rev=0
         def upload(raw,kind,sheet):
