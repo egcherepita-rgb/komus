@@ -5,7 +5,7 @@ from pathlib import Path
 import hashlib, hmac, json, mimetypes, os, secrets, sqlite3, time, threading
 from datetime import date
 from planner import build_plan, LAYOUTS
-from importer import (calculate_pallets, catalog_import, export_pallets, export_plan,
+from importer import (calculate_pallets, catalog_import, export_pallets, export_plan, input_template,
                       moscow_articles_import, moscow_catalog_import, pallet_template)
 import ledger_store
 from workflow import empty_state,public_state,make_plan,apply_import,update_row,dispatch,now,today,canonical_order,validate_row
@@ -131,10 +131,16 @@ class Handler(BaseHTTPRequestHandler):
                     rev,state=ledger_store.read(DATA);return self.send(200,envelope(rev,state))
                 if path=='/api/v2/templates/order':data=template_file('order');filename='komus-new-order.xlsx'
                 elif path=='/api/v2/templates/pallets':data=pallet_template();filename='komus-pallets-template.xlsx'
+                elif path in ('/api/v2/templates/initial','/api/v2/templates/tula','/api/v2/templates/moscow','/api/v2/templates/moscow-articles'):
+                    kind=path.rsplit('/',1)[-1]
+                    data=input_template(kind);filename=f'komus-{kind}-template.xlsx'
                 elif path=='/api/v2/templates/response':
-                    rev,state=ledger_store.read(DATA);order=query.get('order',[''])[0]
-                    rows=[r for r in state['rows'] if not order or r.get('order')==order]
-                    data=template_file('response',rows);filename='dontsova-response.xlsx'
+                    rows=None
+                    if query.get('blank')!=['1']:
+                        _,state=ledger_store.read(DATA);order=query.get('order',[''])[0]
+                        rows=[r for r in state['rows'] if not order or r.get('order')==order]
+                    data=template_file('response',rows)
+                    filename='dontsova-response.xlsx'
                 elif path=='/api/v2/export':
                     rev,state=ledger_store.read(DATA)
                     if not state.get('plan') or not state['plan'].get('wholePalletsOnly') or state['plan'].get('readinessMode')!='position':raise ValueError('Сначала пересоберите машины: одна дата готовности позиции, отгрузка целыми паллетами')

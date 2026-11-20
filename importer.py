@@ -60,16 +60,36 @@ def workbook(raw):
     except (zipfile.BadZipFile,KeyError,OSError): raise ValueError('Нужен корректный файл .xlsx')
 
 def pallet_template():
+    return input_template('pallets')
+
+def input_template(kind):
+    templates = {
+        'pallets': ('Паллеты', PALLET_HEADERS),
+        'initial': ('отгрузка с УЗМК', ('№ заказа Комуса', 'Номер счета', 'Артикул Комуса', 'Артикул ПРОМЕТ',
+                                       'Наименование', 'Заказано, шт.', 'Уже отгружено, шт.', 'Отгрузить до',
+                                       'Дата подтвержденная')),
+        'tula': ('Тула', ('Маркер', 'ВП', 'Наименование ПРОМЕТ', 'Кратность', 'Артикул Комуса', 'Артикул ПРОМЕТ')),
+        'moscow': ('Кратность Москвы', ('Наименование', 'Кратность', 'Артикул Комуса', 'Артикул ПРОМЕТ')),
+        'moscow-articles': ('Артикулы Москвы', ('Наименование', 'Артикул ПРОМЕТ', 'Артикул Комуса')),
+    }
+    title, headers = templates[kind]
     book = Workbook()
     sheet = book.active
-    sheet.title = 'Паллеты'
-    sheet.append(PALLET_HEADERS)
-    for cell in sheet[1]:
+    sheet.title = title
+    if kind == 'tula':
+        sheet.append([None, None, 'ТУЛА'])
+    sheet.append(headers)
+    header_row = sheet.max_row
+    for cell in sheet[header_row]:
         cell.font = Font(color='FFFFFF', bold=True)
         cell.fill = PatternFill('solid', fgColor='005BA8')
-    sheet.column_dimensions['A'].width = 68
-    sheet.column_dimensions['B'].width = 18
-    sheet.freeze_panes = 'A2'
+        column = sheet.column_dimensions[cell.column_letter]
+        column.width = 68 if cell.value.startswith('Наименование') else max(18,len(cell.value)+3)
+        if cell.value.startswith(('Артикул','№ заказа','Номер счета')):
+            column.number_format = '@'
+            for row in range(header_row+1,header_row+21):
+                sheet.cell(row,cell.column).number_format = '@'
+    sheet.freeze_panes = f'A{header_row+1}'
     output = BytesIO()
     book.save(output)
     return output.getvalue()

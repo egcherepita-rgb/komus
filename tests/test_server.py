@@ -85,6 +85,30 @@ class ServerTests(unittest.TestCase):
         self.assertIn('Нет однозначного совпадения',result['rows'][5]['error'])
         self.assertIn('целое число',result['rows'][6]['error'])
         self.assertEqual(json.load(self.request(client,'/api/v2/state')),before)
+    def test_guide_templates_can_be_loaded_in_their_corresponding_forms(self):
+        client = self.client()
+        for template, kind, header_row, position in (
+            ('initial','initial',1,['45001','1001','00001','P-1','Шкаф',24,0,'2026-11-19','2026-11-18']),
+            ('tula','catalog',2,[1,'ВП','Шкаф',24,'00001','P-1']),
+            ('moscow','moscow',1,['Сейф',10,'00002','P-2']),
+            ('moscow-articles','moscow-articles',1,['Сейф','P-2','00002']),
+        ):
+            with self.subTest(template=template):
+                book = load_workbook(BytesIO(self.request(client,f'/api/v2/templates/{template}').read()))
+                for column, value in enumerate(position,1):
+                    book.active.cell(header_row + 1,column,value)
+                raw = BytesIO()
+                book.save(raw)
+                sheet = urllib.parse.quote(book.active.title)
+                preview = json.load(self.request(client,f'/api/v2/import-preview?kind={kind}&sheet={sheet}&mode=full',
+                                                 raw.getvalue(),raw=True))
+                self.assertEqual(preview['count'],1)
+                self.assertFalse(preview['errors'])
+        ledger_store.mutate(server.DATA,0,lambda current:current.update(server.demo()))
+        blank = load_workbook(BytesIO(self.request(client,'/api/v2/templates/response?blank=1').read()))
+        self.assertIsNone(blank.active['B5'].value)
+        populated = load_workbook(BytesIO(self.request(client,'/api/v2/templates/response').read()))
+        self.assertEqual(populated.active['B5'].value,'ДЕМО-001')
     def test_pallet_articles_are_recovered_from_the_matching_order_and_exported(self):
         client = self.client()
         state = server.demo()
