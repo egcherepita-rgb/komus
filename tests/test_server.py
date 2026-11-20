@@ -85,6 +85,30 @@ class ServerTests(unittest.TestCase):
         self.assertIn('Нет однозначного совпадения',result['rows'][5]['error'])
         self.assertIn('целое число',result['rows'][6]['error'])
         self.assertEqual(json.load(self.request(client,'/api/v2/state')),before)
+    def test_pallet_articles_are_recovered_from_the_matching_order_and_exported(self):
+        client = self.client()
+        state = server.demo()
+        for row, order, invoice, komus_sku, sku in (
+            (state['rows'][0],'45001','1001','000712','A-1'),
+            (state['rows'][2],'45002','1002','000713','A-2'),
+        ):
+            row.update(order=order,invoice=invoice,komusSku=komus_sku,sku=sku)
+        ledger_store.mutate(server.DATA,0,lambda current:current.update(state))
+        book = Workbook()
+        book.active.append(['№ заказа Комуса','Номер счёта','Наименование','Количество','Артикул поставщика'])
+        book.active.append(['45001','1001','Демонстрационный сейф',20,None])
+        book.active.append([None,None,'Демонстрационный сейф',20,None])
+        book.active.append(['45002','1002','Демонстрационный сейф',20,'A-2'])
+        raw = BytesIO()
+        book.save(raw)
+        checked = json.load(self.request(client,'/api/v2/pallets',raw.getvalue(),raw=True))
+        result = self.request(client,'/api/v2/pallets/export',{'rows':checked['rows']}).read()
+        sheet = load_workbook(BytesIO(result), data_only=True).active
+        headers = {cell.value:cell.column for cell in sheet[1]}
+        for line, expected in enumerate([('000712','A-1'),(None,None),('000713','A-2')],2):
+            self.assertEqual(tuple(sheet.cell(line,headers[name]).value
+                                   for name in ('Артикул Комуса','Артикул ПРОМЕТ')),expected)
+            self.assertEqual(sheet.cell(line,headers['Красная 0,5']).value,2)
     def test_moscow_catalog_import_and_order_template_pallet_check(self):
         client = self.client()
         state = server.demo()

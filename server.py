@@ -181,7 +181,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/v2/pallets':
                 raw=self.body(15*1024*1024)
                 _,state=ledger_store.read(DATA)
-                return self.send(200,calculate_pallets(raw,state['catalog'],state.get('moscowCatalog',[])))
+                return self.send(200,calculate_pallets(raw,state['catalog'],state.get('moscowCatalog',[]),state['rows']))
             data=json.loads(self.body());expected=data.get('revision')
             if path=='/api/v2/pallets/export':
                 return self.send(200,export_pallets(data.get('rows')),

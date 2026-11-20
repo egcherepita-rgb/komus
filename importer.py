@@ -1,4 +1,5 @@
 """Workbook readers retain provenance and never infer actual shipment from planned columns."""
+from collections import defaultdict
 from datetime import date, datetime
 from io import BytesIO
 import re, zipfile
@@ -7,9 +8,10 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.styles.colors import COLOR_INDEX
 from planner import (LIMITER_PLACEMENT, apply_two_pallet_notation, article_key, number,
                      pallet_capacity, pallet_limiter_model, resolve_catalog_product,
-                     normalize, without_komus_prefix)
+                     normalize, product_name_key, without_komus_prefix)
 
 PALLET_HEADERS = ('Наименование товара', 'Количество')
+ARTICLE_FIELDS = ('komusSku', 'sku')
 PALLET_RESULT_COLUMNS = (
     ('line', 'Строка Excel'),
     ('order', '№ заказа Комуса'),
@@ -30,8 +32,12 @@ def column_title(value):
     return ' '.join(str(value or '').casefold().replace('ё', 'е').split()).rstrip(':')
 
 def article_columns(titles):
-    aliases = {'артикул комуса': 'komusSku', 'артикул комус': 'komusSku', 'артикул промет': 'sku'}
-    return {aliases[title]: i for i, title in enumerate(titles) if title in aliases}
+    aliases = {
+        'komusSku': ('артикул комуса', 'артикул комус', 'код товара комуса', 'артикул покупателя'),
+        'sku': ('артикул промет', 'артикул промета', 'код товара промет', 'артикул поставщика'),
+    }
+    return {field: titles.index(title) for field, names in aliases.items()
+            if (title := next((name for name in names if name in titles), None)) is not None}
 
 def moscow_model(value):
     name = without_komus_prefix(value).upper()
@@ -68,7 +74,42 @@ def pallet_template():
     book.save(output)
     return output.getvalue()
 
-def calculate_pallets(raw, catalog, moscow=()):
+def pallet_article_index(journal, catalog, label, extra_model):
+    index = defaultdict(list)
+    for row in journal:
+        if not any(row.get(field) for field in ARTICLE_FIELDS):
+            continue
+        names = {product_name_key(row.get(field)) for field in ('name', 'prometName')}
+        for name in names - {''}:
+            index[name].append(row)
+        try:
+            item = resolve_catalog_product(row, catalog, label, extra_model)
+        except ValueError:
+            continue
+        index[id(item)].append(row)
+    return index
+
+def pallet_articles(product, item, order, invoice, index):
+    codes = {field: product.get(field) or article_key(item.get(field)) for field in ARTICLE_FIELDS}
+    if all(codes.values()):
+        return codes
+    by_name = index.get(product_name_key(product['name']), ())
+    by_item = index.get(id(item), ())
+    scoped = [row for row in (*by_name, *by_item)
+              if (not order or article_key(row.get('order')) == order)
+              and (not invoice or article_key(row.get('invoice')) == invoice)]
+    candidates = scoped if scoped and (order or invoice) else (*by_name, *by_item)
+    compatible = [row for row in candidates
+                  if all(not codes[field] or not row.get(field) or codes[field] == article_key(row[field])
+                         for field in ARTICLE_FIELDS)]
+    for field in ARTICLE_FIELDS:
+        if not codes[field]:
+            values = {article_key(row.get(field)) for row in compatible} - {''}
+            if len(values) == 1:
+                codes[field] = values.pop()
+    return codes
+
+def calculate_pallets(raw, catalog, moscow=(), journal=()):
     if not catalog and not moscow:
         raise ValueError('Сначала загрузите справочник во вкладке «Кратность Тула и Москва».')
     products = [dict(item, warehouse='Тула') for item in catalog]
@@ -83,14 +124,18 @@ def calculate_pallets(raw, catalog, moscow=()):
                             if title in ('количество', 'количество, шт.', 'кол.', 'кол-во', 'кол-во, шт.', 'заказано, шт.')), None)
             if name_col is not None and qty_col is not None:
                 order_col = titles.index('№ заказа комуса') if '№ заказа комуса' in titles else None
-                return calculate_pallet_rows(sheet, line, name_col, qty_col, products, article_columns(titles), order_col)
+                invoice_col = next((i for i, title in enumerate(titles) if title in ('номер счета', 'счет')), None)
+                return calculate_pallet_rows(sheet, line, name_col, qty_col, products, article_columns(titles),
+                                             order_col, invoice_col, journal, bool(moscow))
     raise ValueError('Загрузите шаблон заказа Комуса или Excel с колонками «Наименование товара» и «Количество».')
 
-def calculate_pallet_rows(sheet, header_line, name_col, qty_col, catalog, articles, order_col):
+def calculate_pallet_rows(sheet, header_line, name_col, qty_col, catalog, articles, order_col, invoice_col, journal, has_moscow):
     if sheet.max_row - header_line > 5000:
         raise ValueError('В одном расчёте допускается до 5 000 строк.')
     rows = []
-    has_moscow = any(item['warehouse'] == 'МСК' for item in catalog)
+    label = 'Тула и Москва' if has_moscow else 'Тула'
+    extra_model = moscow_model if has_moscow else None
+    index = pallet_article_index(journal, catalog, label, extra_model)
     for line, cells in enumerate(sheet.iter_rows(min_row=header_line + 1, values_only=True), header_line + 1):
         name = str(cells[name_col] or '').strip()
         quantity = cells[qty_col]
@@ -98,6 +143,7 @@ def calculate_pallet_rows(sheet, header_line, name_col, qty_col, catalog, articl
         if not name and quantity in (None, '') and not any(product.values()):
             continue
         order = article_key(cells[order_col]) if order_col is not None else ''
+        invoice = article_key(cells[invoice_col]) if invoice_col is not None else ''
         result = {'line': line, 'name': name, 'order': order, 'quantity': str(quantity) if quantity is not None else ''}
         result.update(product)
         rows.append(result)
@@ -106,14 +152,13 @@ def calculate_pallet_rows(sheet, header_line, name_col, qty_col, catalog, articl
                 raise ValueError('Укажите наименование товара.')
             result['quantity'] = number(quantity, 'Количество', allow_zero=False)
             product['name'] = name
-            item = dict(resolve_catalog_product(product, catalog, 'Тула и Москва' if has_moscow else 'Тула',
-                                                moscow_model if has_moscow else None))
+            item = resolve_catalog_product(product, catalog, label, extra_model)
             result.update(warehouse=item['warehouse'], name=name or item['name'])
-            for field in ('komusSku', 'sku'):
-                result[field] = product.get(field) or article_key(item.get(field))
+            result.update(pallet_articles(product, item, order, invoice, index))
             if item['warehouse'] == 'МСК':
                 result['note'] = 'Позиция Москвы'
                 continue
+            item = dict(item)
             apply_two_pallet_notation(item)
             if item.get('needsReview'):
                 raise ValueError('Проверьте кратность товара в справочнике Тула.')
