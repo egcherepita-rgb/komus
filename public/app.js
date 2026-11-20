@@ -11,7 +11,7 @@ let layouts=[],layoutsLoading=null;
 let rowTransition=null,planToClear=null,palletExchange=null;
 let palletRows=null,palletsExporting=false;
 function banner(message,error=false){$('banner').hidden=!message;$('banner').textContent=message||'';$('banner').classList.toggle('error',error);}
-function lock(value){busy=value;document.querySelectorAll('.mutation').forEach(b=>b.disabled=value||readOnly);if(!value&&$('uploadDialog').open)$('applyImport').disabled=readOnly||!uploadToken;}
+function lock(value){busy=value;document.querySelectorAll('.mutation').forEach(b=>b.disabled=value||readOnly);if(!value&&$('uploadDialog').open)$('applyImport').disabled=readOnly||!uploadToken;updatePalletExchangeButton();}
 async function request(path,{body,raw=false,binary=false}={}){
  if(readOnly&&body!==undefined)throw Error('Демонстрация доступна только для просмотра. Для своего журнала войдите в приложение.');
  const headers=body===undefined?{}:{'X-Komus-Client':'web',...(raw?{'X-Komus-Revision':String(revision)}:{'Content-Type':'application/json'})};
@@ -420,32 +420,47 @@ function openPallet(truckId,index,shipmentId){
  $('palletExchangeForm').hidden=!canExchange;
  $('closePalletDetail').hidden=canExchange;
  if(canExchange){
-  const targets=state.plan.trucks.filter(t=>t.id!==truck.id&&pallet.ready<=t.date&&
-   t.pallets.some(p=>p.type===pallet.type&&!p.partial&&p.ready<=truck.date));
+  const targets=state.plan.trucks.filter(t=>t.id!==truck.id);
   palletExchange={truck,index,pallet,targets,planId:state.plan.id,revision};
   $('palletTargetTruck').innerHTML='<option value="">Выберите машину</option>'+targets.map(t=>
    `<option value="${t.id}">№ ${t.id} · ${datefmt(t.date)}</option>`).join('');
   $('palletTargetTruck').value='';
-  $('palletExchangeError').textContent='';
+  $('palletTargetTruck').disabled=!targets.length;
   $('palletTargetTruck').onchange();
  }
  $('palletDialog').showModal();
 }
+function palletExchangeChoices(exchange,target){
+ if(!target)return {options:[],reason:exchange.targets.length?'':'В текущем плане нет другой машины для обмена.'};
+ const {pallet,truck}=exchange;
+ if(pallet.ready>target.date)return {options:[],reason:`Эта паллета будет готова ${datefmt(pallet.ready)}, после выезда машины № ${target.id} (${datefmt(target.date)}).`};
+ const matching=target.pallets.map((p,index)=>({p,index})).filter(({p})=>p.type===pallet.type&&!p.partial);
+ if(!matching.length)return {options:[],reason:`В машине № ${target.id} нет целой паллеты этого типа для обмена.`};
+ const options=matching.filter(({p})=>p.ready<=truck.date);
+ return {options,reason:options.length?'':`Паллеты этого типа из машины № ${target.id} не будут готовы к выезду машины № ${truck.id} (${datefmt(truck.date)}).`};
+}
+function updatePalletExchangeButton(){
+ $('savePalletExchange').disabled=busy||readOnly||$('palletTargetPlace').value==='';
+}
 $('palletTargetTruck').onchange=()=>{
  const target=palletExchange.targets.find(t=>t.id===Number($('palletTargetTruck').value));
- const options=target?.pallets.map((p,index)=>({p,index})).filter(({p})=>
-  p.type===palletExchange.pallet.type&&!p.partial&&p.ready<=palletExchange.truck.date)||[];
+ const {options,reason}=palletExchangeChoices(palletExchange,target);
  $('palletTargetPlace').innerHTML='<option value="">Выберите паллету</option>'+options.map(({p,index})=>
   `<option value="${index}">Место ${index+1} · ${esc(p.name)} · ${fmt(p.qty)} шт. · заказ ${esc(p.order)}</option>`).join('');
  $('palletTargetPlace').value='';
- $('palletExchangeNote').textContent=palletExchange.targets.length?'':'Нет другой машины с подходящей паллетой и датой готовности.';
+ $('palletTargetPlace').disabled=!options.length;
+ $('palletExchangeNote').textContent=reason;
+ $('palletExchangeError').textContent='';
+ updatePalletExchangeButton();
 };
 $('palletTargetPlace').onchange=()=>{
  const target=palletExchange.targets.find(t=>t.id===Number($('palletTargetTruck').value));
  const place=$('palletTargetPlace').value;
  const pallet=place!==''?target?.pallets[Number(place)]:null;
  const late=pallet&&(pallet.due<palletExchange.truck.date||palletExchange.pallet.due<target.date);
- $('palletExchangeNote').textContent=late?'После обмена одна или обе позиции могут выйти за срок отгрузки.':'';
+ $('palletExchangeNote').textContent=late?'После обмена одна или обе позиции могут выйти за срок отгрузки.':palletExchangeChoices(palletExchange,target).reason;
+ $('palletExchangeError').textContent='';
+ updatePalletExchangeButton();
 };
 $('palletExchangeForm').onsubmit=async event=>{
  event.preventDefault();
@@ -453,6 +468,9 @@ $('palletExchangeForm').onsubmit=async event=>{
  const {truck,index,planId}=palletExchange;
  const targetId=$('palletTargetTruck').value,targetIndex=$('palletTargetPlace').value;
  if(!targetId||targetIndex==='')return;
+ const target=palletExchange.targets.find(t=>t.id===Number(targetId));
+ const {options}=palletExchangeChoices(palletExchange,target);
+ if(!options.some(({index})=>index===Number(targetIndex)))return;
  try{
   if(palletExchange.revision!==revision)throw Error('План изменился. Откройте паллету заново.');
   if(await action('pallet-exchange',{planId,sourceId:truck.id,sourceIndex:index,targetId:Number(targetId),targetIndex:Number(targetIndex)}))$('palletDialog').close();

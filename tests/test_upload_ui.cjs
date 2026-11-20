@@ -172,28 +172,56 @@ test('shipment history searches name, both articles, order and invoice, includin
   }
 });
 
-test('pallet exchange offers only a compatible ready pallet and sends both places', async () => {
+test('pallet exchange lists all other trucks and explains unavailable exchanges', async () => {
   const c = client({ upload: false });
   c.run(`const item={name:'Паллета',qty:20,order:'45001',type:'single',ready:'2026-11-17',due:'2026-11-19'};
     state={plan:{id:'plan',trucks:[
       {id:1,date:'2026-11-18',pallets:[item]},
       {id:2,date:'2026-11-19',pallets:[{...item,type:'double'}, {...item,name:'Готов к обмену'}]},
       {id:3,date:'2026-11-20',pallets:[{...item,ready:'2026-11-20'}]},
+      {id:4,date:'2026-11-20',pallets:[{...item,type:'double'}, {...item,partial:true}]},
+      {id:5,date:'2026-11-16',pallets:[{...item,ready:'2026-11-16'}]},
     ]}}; revision=4;render=()=>{}`);
   c.click({pallet:'0',truck:'1'});
   assert.match(c.element('palletTargetTruck').innerHTML,/value="2"/);
-  assert.doesNotMatch(c.element('palletTargetTruck').innerHTML,/value="3"/);
+  assert.doesNotMatch(c.element('palletTargetTruck').innerHTML,/value="1"/);
+  for (const [id, reason] of [
+    ['3', /из машины № 3 не будут готовы/],
+    ['4', /В машине № 4 нет целой паллеты этого типа/],
+    ['5', /после выезда машины № 5/],
+  ]) {
+    assert.ok(c.element('palletTargetTruck').innerHTML.includes(`value="${id}"`));
+    c.element('palletTargetTruck').value=id;
+    c.run("$('palletTargetTruck').onchange()");
+    assert.match(c.element('palletExchangeNote').textContent,reason);
+    assert.equal(c.element('palletTargetPlace').disabled,true);
+    assert.equal(c.element('savePalletExchange').disabled,true);
+    c.element('palletTargetPlace').value='0';
+    await c.run("$('palletExchangeForm').onsubmit({preventDefault(){}})");
+    assert.equal(c.calls.length,0);
+  }
   c.element('palletTargetTruck').value='2';
   c.run("$('palletTargetTruck').onchange()");
   assert.match(c.element('palletTargetPlace').innerHTML,/Готов к обмену/);
   assert.doesNotMatch(c.element('palletTargetPlace').innerHTML,/value="0"/);
   c.element('palletTargetPlace').value='1';
+  c.run("$('palletTargetPlace').onchange()");
+  assert.equal(c.element('savePalletExchange').disabled,false);
   c.replies.push({revision:5,state:{},result:{}});
   await c.run("$('palletExchangeForm').onsubmit({preventDefault(){}})");
   assert.equal(c.calls[0].url,'/api/v2/pallet-exchange');
   assert.deepEqual(JSON.parse(c.calls[0].options.body),{
     revision:4,planId:'plan',sourceId:1,sourceIndex:0,targetId:2,targetIndex:1,
   });
+});
+
+test('pallet exchange explains when the plan contains only one truck', () => {
+  const c = client({ upload: false });
+  c.run("state={plan:{id:'plan',trucks:[{id:1,pallets:[{name:'Паллета',qty:20}]}]}}");
+  c.click({pallet:'0',truck:'1'});
+  assert.match(c.element('palletExchangeNote').textContent,/нет другой машины/);
+  assert.equal(c.element('palletTargetTruck').disabled,true);
+  assert.equal(c.element('savePalletExchange').disabled,true);
 });
 
 test('leftover searches the journal article and uses the same shipment dialog', async () => {

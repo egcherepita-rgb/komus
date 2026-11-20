@@ -158,9 +158,9 @@
   <p>Выберите паллету того же типа для обмена. Обе машины сохранят полную загрузку.</p>
   <label>Машина<select id="palletTargetTruck" required></select></label>
   <label>Встречная паллета<select id="palletTargetPlace" required></select></label>
-  <p id="palletExchangeNote" class="muted"></p>
+  <p id="palletExchangeNote" class="muted" role="status"></p>
   <p id="palletExchangeError" class="error" role="alert"></p>
-  <div class="modal-footer"><button type="button" data-close="palletDialog">Закрыть</button><button id="savePalletExchange" type="submit" class="primary mutation">Поменять паллеты</button></div>
+  <div class="modal-footer"><button type="button" data-close="palletDialog">Закрыть</button><button id="savePalletExchange" type="submit" class="primary mutation" disabled>Поменять паллеты</button></div>
  </form>
  <button id="closePalletDetail" type="button" data-close="palletDialog">Закрыть</button>
 </dialog><script src="/app.js" defer></script></body></html>
