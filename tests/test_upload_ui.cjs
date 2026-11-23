@@ -278,6 +278,26 @@ test('an active reservation can be removed from the order row without entering a
   assert.equal(c.element('rowTransitionDialog').open, false);
 });
 
+test('order deletion confirms the exact row and warns about the affected plan', async () => {
+  const c = client({ upload: false });
+  c.run(`const row={id:'row1',order:'TEST-1',invoice:'87654',name:'Шкаф',qty:40,shipped:0,reserved:20};
+    state={rows:[row],plan:{trucks:[{pallets:[{rowId:'row1'}],loose:[]}]}}; revision=4; render=()=>{}`);
+  assert.match(c.run('orderRowActions(row)'),/data-delete-row="row1"/);
+  assert.doesNotMatch(c.run('orderRowActions(row,20)'),/data-delete-row/);
+  assert.doesNotMatch(c.run('orderRowActions({...row,shipped:10})'),/data-delete-row/);
+  c.click({deleteRow:'row1'});
+  assert.equal(c.element('deleteRowDialog').open,true);
+  assert.equal(c.element('deleteRowPlan').hidden,false);
+  assert.equal(c.element('deleteRowReserve').hidden,false);
+  assert.match(c.element('deleteRowDescription').textContent,/Шкаф.*TEST-1.*87654/);
+  assert.equal(c.calls.length,0);
+  c.replies.push({revision:5,state:{rows:[],plan:null},result:{}});
+  await c.run("$('deleteRowForm').onsubmit({preventDefault(){}})");
+  assert.equal(c.calls[0].url,'/api/v2/row-delete');
+  assert.deepEqual(JSON.parse(c.calls[0].options.body),{revision:4,id:'row1'});
+  assert.equal(c.element('deleteRowDialog').open,false);
+});
+
 test('clear plan is sent only after confirmation and targets the selected plan', async () => {
   const c = client({ upload: false });
   c.run("state={plan:{id:'plan-A'}}; revision=4; render=()=>{}; $('clearPlan').onclick()");

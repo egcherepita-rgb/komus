@@ -143,6 +143,16 @@
 <div class="modal-footer"><button type="button" data-close="rowTransitionDialog">Отмена</button><button id="saveRowTransition" class="primary mutation" type="submit"></button></div>
 </form>
 </dialog>
+<dialog id="deleteRowDialog" aria-labelledby="deleteRowTitle">
+<form id="deleteRowForm">
+<h2 id="deleteRowTitle">Удалить позицию из заказа?</h2>
+<p id="deleteRowDescription"></p>
+<p id="deleteRowReserve" hidden>По этой позиции есть ручной резерв. При удалении строки резерв будет снят.</p>
+<p id="deleteRowPlan" hidden>Позиция входит в плановую машину. После удаления текущий план будет сброшен, и машины нужно будет собрать заново.</p>
+<p id="deleteRowError" class="error" role="alert"></p>
+<div class="modal-footer"><button type="button" data-close="deleteRowDialog" autofocus>Отмена</button><button type="submit" class="primary mutation">Удалить позицию</button></div>
+</form>
+</dialog>
 <dialog id="clearPlanDialog">
 <form id="clearPlanForm">
 <h2>Сбросить план машин?</h2>

@@ -140,6 +140,13 @@ def apply_import(state,kind,parsed,meta):
     if kind not in ('moscow','moscow-articles'):state['plan']=None
     return {'duplicate':False,'message':'Данные загружены и сохранены на сервере.'}
 
+def trucks_contain_row(trucks, row_id):
+    return any(item['rowId']==row_id for truck in trucks for item in truck['pallets']+truck['loose'])
+
+def row_has_shipment_history(state, row_id):
+    return trucks_contain_row(state['shipments'], row_id) or any(
+        entry['rowId']==row_id for entry in state.get('manualShipments',[]))
+
 def update_row(state,rid,changes):
     r=next((r for r in state['rows'] if r['id']==rid),None)
     if r is None:raise ValueError('Позиция не найдена')
@@ -147,9 +154,7 @@ def update_row(state,rid,changes):
     if set(changes)-allowed:raise ValueError('Неизвестное поле позиции')
     candidate=deepcopy(r);candidate.update(changes);candidate['order']=canonical_order(candidate.get('order'))
     # Shipment history is authoritative after the first recorded dispatch.
-    has_history=any(p['rowId']==rid for t in state['shipments'] for p in t['pallets']+t['loose'])
-    has_history=has_history or any(entry['rowId']==rid for entry in state.get('manualShipments',[]))
-    if has_history:
+    if row_has_shipment_history(state, rid):
         if candidate['shipped']!=r['shipped']:raise ValueError('Количество отправленного учтено в истории отгрузок. Для новой отправки нажмите «Отгружено».')
         if any(candidate.get(k)!=r.get(k) for k in ('order','position','name','invoice','sku','komusSku')):raise ValueError('Реквизиты позиции с фактической отгрузкой связаны с историей отгрузок.')
     if 'lots' not in changes and any(candidate.get(k)!=r.get(k) for k in ('qty','shipped')):
@@ -159,6 +164,25 @@ def update_row(state,rid,changes):
     validate_row(candidate)
     if any(x['id']!=rid and key(x.get('order'),x.get('position'))==key(candidate['order'],candidate['position']) for x in state['rows']):raise ValueError('Такая позиция этого заказа уже существует')
     r.update(candidate);state['reconciled']=False;state['plan']=None
+
+def delete_row(state, row_id):
+    row=next((row for row in state['rows'] if row['id']==row_id),None)
+    if row is None:
+        raise ValueError('Позиция заказа не найдена.')
+    if number(row.get('shipped',0),'Уже отгружено') or row_has_shipment_history(state, row_id):
+        raise ValueError('Удаление недоступно: по позиции есть фактическая отгрузка.')
+
+    state['rows'].remove(row)
+    message='Позиция удалена из заказа.'
+    plan=state.get('plan')
+    if plan:
+        if trucks_contain_row(plan['trucks'], row_id):
+            state['plan']=None
+            message+=' План сброшен. Соберите машины заново.'
+        else:
+            for field in ('leftovers','issues'):
+                plan[field]=[item for item in plan[field] if item.get('rowId')!=row_id]
+    return {'message':message}
 
 def transition_row(state, row_id, operation, quantity, actual_date=None, rebuild_plan=False):
     row=next((row for row in state['rows'] if row['id']==row_id),None)

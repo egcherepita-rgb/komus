@@ -325,6 +325,38 @@ class ServerTests(unittest.TestCase):
         self.assertIsNone(after['plan'])
         for key in ('rows','catalog','shipments','manualShipments','reconciled'):
             self.assertEqual(after[key],sent['state'][key])
+    def test_delete_order_row_preserves_unaffected_trucks_and_rejects_shipped_rows(self):
+        client=self.client()
+        state=server.demo()
+        state['rows'][1].update(shipped=20, lots=[])
+        state['rows'][2]['reserved']=60
+        wf.make_plan(state)
+        plan=state['plan']
+        self.assertTrue(plan['trucks'])
+        self.assertTrue(any(item['rowId']=='demo3' for item in plan['leftovers']))
+        rev,_,_=ledger_store.mutate(server.DATA,0,lambda s:s.update(state))
+        with self.assertRaises(urllib.error.HTTPError) as ex:
+            self.request(client,'/api/v2/row-delete',{'id':'demo2','revision':rev})
+        self.assertEqual(ex.exception.code,400)
+
+        result=json.load(self.request(client,'/api/v2/row-delete',{'id':'demo3','revision':rev}))
+        after=result['state']
+        self.assertEqual([row['id'] for row in after['rows']],['demo1','demo2'])
+        self.assertEqual(after['plan']['trucks'],plan['trucks'])
+        self.assertEqual(after['plan']['id'],plan['id'])
+        self.assertFalse(any(item['rowId']=='demo3' for item in after['plan']['leftovers']))
+        self.assertTrue(after['reconciled'])
+        with self.assertRaises(urllib.error.HTTPError) as ex:
+            self.request(client,'/api/v2/row-delete',{'id':'demo1','revision':rev})
+        self.assertEqual(ex.exception.code,409)
+
+        result=json.load(self.request(client,'/api/v2/row-delete',{'id':'demo1','revision':result['revision']}))
+        after=json.load(self.request(client,'/api/v2/state'))['state']
+        self.assertIsNone(after['plan'])
+        self.assertEqual([row['id'] for row in after['rows']],['demo2'])
+        self.assertEqual(after['rows'][0]['shipped'],20)
+        self.assertEqual(after['catalog'],state['catalog'])
+
     def test_catalog_site_move_controls_whether_item_is_included_in_the_plan(self):
         client = self.client()
         state = server.demo()

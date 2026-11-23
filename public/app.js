@@ -8,7 +8,7 @@ const types={single:'Красная 0,5',double:'Чёрная 1',split:'Крас
 const importNames={initial:'Первоначальный файл отгрузок',catalog:'Кратность Тула',moscow:'Кратность Москвы','moscow-articles':'Артикулы Москвы',order:'Новый заказ Комуса',response:'Ответ Донцовой'};
 let state=null,revision=0,busy=false,month=today().slice(0,7),uploadKind='',uploadToken=null,uploadGeneration=0,editing=null,dispatching=null;
 let layouts=[],layoutsLoading=null;
-let rowTransition=null,planToClear=null,palletExchange=null;
+let rowTransition=null,rowToDelete=null,planToClear=null,palletExchange=null;
 let palletRows=null,palletsExporting=false;
 function banner(message,error=false){$('banner').hidden=!message;$('banner').textContent=message||'';$('banner').classList.toggle('error',error);}
 function lock(value){busy=value;document.querySelectorAll('.mutation').forEach(b=>b.disabled=value||readOnly);if(!value&&$('uploadDialog').open)$('applyImport').disabled=readOnly||!uploadToken;updatePalletExchangeButton();}
@@ -159,12 +159,15 @@ function orderRowActions(row,leftoverQuantity){
  if(readOnly)return edit;
  if(row.shipped===row.qty)return '<span class="tag">Отгружено</span>'+edit;
  const release=row.reserved? `<button class="compact-action mutation" data-release-row="${id}"${attributes}>Снять отметку</button>`:'';
+ const remove=leftoverQuantity===undefined&&!row.shipped
+  ? `<button type="button" class="compact-action mutation" data-delete-row="${id}">Удалить позицию</button>`:'';
  return `<div class="actions">
   <button class="compact-action mutation" data-ship-row="${id}"${attributes}>Отгружено</button>
   <button class="compact-action mutation" data-reserve-row="${id}"${attributes}>${row.reserved?'Изменить количество в машине':'В готовой машине'}</button>
   ${release}
   <button class="compact-action mutation" data-urgency-row="${id}" data-urgent="${!row.urgent}">${row.urgent?'Снять срочность':'Срочно'}</button>
   ${edit}
+  ${remove}
  </div>`;
 }
 function renderResponses(){const rows=state.rows.filter(r=>r.ready||r.replyAsOf||r.readinessNeedsReview);$('responsesTable').innerHTML=table(['Заказ','Счёт','Товар','Дата ответа','Дата готовности всей позиции'],rows.map(r=>[esc(r.order),esc(r.invoice),esc(r.name),r.replyAsOf?datefmt(r.replyAsOf):'Из первоначального файла',r.ready?datefmt(r.ready):r.readinessNeedsReview?'Нужна одна дата на всю позицию':'Дата готовности не указана']));$('responseFiles').innerHTML=fileTable(state.imports.filter(h=>h.kind==='response'));}
@@ -393,6 +396,26 @@ $('rowTransitionForm').onsubmit=async event=>{
   if(await action('row-transition',data))$('rowTransitionDialog').close();
  }catch(error){$('rowTransitionError').textContent=error.message;}
 };
+function openDeleteRow(id){
+ if(busy||readOnly)return;
+ const row=state.rows.find(row=>row.id===id);
+ if(!row||row.shipped)return;
+ rowToDelete={id,revision};
+ $('deleteRowDescription').textContent=`${row.name} · ${fmt(row.qty)} шт. · заказ ${row.order}${row.invoice?' · счёт '+row.invoice:''}`;
+ $('deleteRowReserve').hidden=!row.reserved;
+ $('deleteRowPlan').hidden=!state.plan?.trucks.some(truck=>
+  [...truck.pallets,...truck.loose].some(item=>item.rowId===id));
+ $('deleteRowError').textContent='';
+ $('deleteRowDialog').showModal();
+}
+$('deleteRowForm').onsubmit=async event=>{
+ event.preventDefault();
+ if(busy||readOnly||!rowToDelete)return;
+ try{
+  if(rowToDelete.revision!==revision)throw Error('Журнал изменился. Откройте удаление позиции заново.');
+  if(await action('row-delete',{id:rowToDelete.id}))$('deleteRowDialog').close();
+ }catch(error){$('deleteRowError').textContent=error.message;}
+};
 $('clearPlan').onclick=()=>{
  if(!state?.plan||readOnly||busy)return;
  planToClear=state.plan.id;
@@ -480,6 +503,7 @@ document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b||
  if(b.dataset.layout)openLayout(Number(b.dataset.layout)).catch(()=>{});
  if(b.dataset.tab)tab(b.dataset.tab);if(b.dataset.close)$(b.dataset.close).close();if(b.dataset.download)download(b.dataset.download);if(b.dataset.import)showUpload(b.dataset.import);if(b.dataset.editRow)editRow(b.dataset.editRow);if(b.dataset.editCatalog!==undefined)editCatalog(Number(b.dataset.editCatalog),b.dataset.catalogSource);
  if(b.dataset.shipRow)openRowTransition(b.dataset.shipRow,'ship',b.dataset.leftoverQuantity);
+ if(b.dataset.deleteRow)openDeleteRow(b.dataset.deleteRow);
  if(b.dataset.reserveRow)openRowTransition(b.dataset.reserveRow,'reserve',b.dataset.leftoverQuantity);
  if(b.dataset.releaseRow)openRowTransition(b.dataset.releaseRow,'release',b.dataset.leftoverQuantity);
  if(b.dataset.dispatch){dispatching=Number(b.dataset.dispatch);const t=state.plan.trucks.find(t=>t.id===dispatching);$('dispatchDescription').textContent=`Машина № ${t.id}: ${fmt(sumTruck(t))} шт., ${summary(t).length} позиций. Плановая дата ${datefmt(t.date)}.`;$('actualDate').value=today();$('actualDate').max=today();$('dispatchError').textContent='';$('dispatchDialog').showModal();}

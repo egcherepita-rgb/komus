@@ -9,7 +9,7 @@ from importer import (calculate_pallets, catalog_import, export_pallets, export_
                       moscow_articles_import, moscow_catalog_import, pallet_template)
 import ledger_store
 from workflow import empty_state,public_state,make_plan,apply_import,update_row,dispatch,now,today,canonical_order,validate_row
-from workflow import clear_plan, exchange_pallets, set_order_urgency, transition_row
+from workflow import clear_plan, delete_row, exchange_pallets, set_order_urgency, transition_row
 from import_v2 import parse_initial,parse_order,parse_response,template_file
 from planner import article_key, number, pallet_limiter_model, product_name_key
 
@@ -247,6 +247,8 @@ class Handler(BaseHTTPRequestHandler):
                 with LOCK:PREVIEWS.pop(token,None)
             elif path=='/api/v2/row':
                 rev,state,result=ledger_store.mutate(DATA,expected,lambda s:update_row(s,data['id'],data['changes']))
+            elif path=='/api/v2/row-delete':
+                rev,state,result=ledger_store.mutate(DATA,expected,lambda s:delete_row(s,data['id']))
             elif path=='/api/v2/row-transition':
                 rev,state,result=ledger_store.mutate(DATA,expected,lambda s:transition_row(
                     s,data['id'],data['operation'],data['quantity'],data.get('actualDate'),
